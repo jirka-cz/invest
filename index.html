@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Investiční Dashboard</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="theme-color" content="#0a0f1e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0a0f1e;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding-bottom:70px}
+  .card{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:16px;margin:12px}
+  .card-title{font-size:15px;font-weight:800}
+  .card-sub{font-size:11px;color:#64748b;margin-top:2px}
+  .btn{padding:10px 14px;border-radius:10px;border:none;color:#e2e8f0;font-size:13px;font-weight:700;cursor:pointer}
+  .btn-sm{padding:6px 10px;font-size:12px;border-radius:8px;border:none;font-weight:700;cursor:pointer}
+  input,textarea,select{width:100%;background:#0f172a;border:1px solid #334155;border-radius:8px;color:#e2e8f0;font-size:13px;padding:8px 10px;font-family:inherit}
+  .field-label{font-size:11px;color:#64748b;margin:8px 0 4px}
+  .header{padding:16px;display:flex;align-items:center;gap:10px}
+  .bottom-nav{position:fixed;bottom:0;left:0;right:0;background:#0f172a;border-top:1px solid #1e293b;display:flex;justify-content:space-around;padding:6px 0;padding-bottom:calc(6px + env(safe-area-inset-bottom));z-index:50}
+  .nav-btn{background:none;border:none;color:#64748b;font-size:10px;display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 10px;cursor:pointer}
+  .nav-btn.active{color:#7c3aed}
+  .nav-icon{font-size:20px}
+  .row{display:flex;justify-content:space-between;align-items:center;gap:10px}
+  .row + .row{margin-top:8px}
+  .pos-item{background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:12px;margin-top:8px;cursor:pointer}
+  .pos-item:active{border-color:#7c3aed}
+  .pos-name{font-size:14px;font-weight:700}
+  .pos-meta{font-size:11px;color:#64748b;margin-top:2px}
+  .pos-value{font-size:14px;font-weight:800;text-align:right}
+  .pnl-pos{color:#22c55e}
+  .pnl-neg{color:#ef4444}
+  .type-badge{font-size:10px;padding:2px 7px;border-radius:99px;font-weight:700;display:inline-block}
+  .type-akcie{background:#1e3a8a;color:#93c5fd}
+  .type-etf{background:#164e63;color:#67e8f9}
+  .type-penzijni{background:#3f2d1e;color:#fbbf24}
+  .type-krypto{background:#3f1e3f;color:#e9a3e9}
+  .tx-row{display:flex;justify-content:space-between;font-size:12px;padding:8px 0;border-bottom:1px solid #1e293b}
+  .tx-row:last-child{border-bottom:none}
+  .tx-del{color:#ef4444;background:none;border:none;font-size:12px;cursor:pointer;padding:0 0 0 8px}
+  .backlink{color:#7c3aed;font-size:12px;background:none;border:none;cursor:pointer;padding:0;margin-bottom:10px;display:inline-block;font-weight:700}
+  .alloc-bar{height:8px;border-radius:4px;background:#1e293b;overflow:hidden;display:flex;margin-top:6px}
+  .alloc-seg{height:100%}
+  .empty-hint{font-size:12px;color:#475569;text-align:center;padding:20px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .stat-box{background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:10px}
+  .stat-num{font-size:17px;font-weight:800}
+  .stat-lbl{font-size:10px;color:#64748b;margin-top:2px}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <span style="font-size:28px">📊</span>
+  <div>
+    <div style="font-size:17px;font-weight:800" id="hdr-name">Investiční Dashboard</div>
+    <div class="card-sub" id="hdr-sub">Zatím žádná data</div>
+  </div>
+</div>
+
+<div id="app"></div>
+
+<div class="bottom-nav">
+  <button class="nav-btn" data-tab="prehled" onclick="showTab('prehled')"><span class="nav-icon">📈</span>Přehled</button>
+  <button class="nav-btn" data-tab="portfolio" onclick="showTab('portfolio')"><span class="nav-icon">💼</span>Portfolio</button>
+  <button class="nav-btn" data-tab="ai" onclick="showTab('ai')"><span class="nav-icon">🤖</span>AI</button>
+  <button class="nav-btn" data-tab="admin" onclick="showTab('admin')"><span class="nav-icon">⚙️</span>Admin</button>
+</div>
+
+<script>
+// ── STAV (localStorage) ────────────────────────────────────────────────────
+const DEFAULT_S = {
+  name:"", workerUrl:"",
+  sysPrompt:"Jsi finanční poradce. Odpovídáš stručně, věcně, v češtině. Nedáváš konkrétní investiční doporučení jako autoritativní radu, spíš fakta a kontext k rozhodnutí uživatele.",
+  rates:{ USD: 23.5, EUR: 25.2 } // kolik CZK za 1 jednotku měny — zatím ruční, později napojíme na ČNB API
+};
+let S = JSON.parse(localStorage.getItem("inv_s") || "null") || {...DEFAULT_S};
+S = {...DEFAULT_S, ...S, rates:{...DEFAULT_S.rates, ...(S.rates||{})}};
+
+const DEFAULT_P = { positions: [] };
+let P = JSON.parse(localStorage.getItem("inv_p") || "null") || {...DEFAULT_P};
+
+// META sleduje, KDY se naposledy změnila lokální data (ne obsah samotný) —
+// slouží k rozhodnutí "kdo je novější" mezi tímto zařízením a cloudem.
+let META = JSON.parse(localStorage.getItem("inv_meta") || "null") || { lastChange: null };
+function saveMeta(){ localStorage.setItem("inv_meta", JSON.stringify(META)); }
+
+let currentTab = "prehled";
+let openPositionId = null; // když je nastaveno, portfolio tab zobrazuje detail pozice
+let autoSyncTimer = null;
+let syncInFlight = false;
+
+const TYPE_LABEL = { akcie:"Akcie", etf:"ETF", penzijni:"Penzijní spoření", krypto:"Kryptoměny" };
+const TYPE_COLOR = { akcie:"#3b82f6", etf:"#06b6d4", penzijni:"#f59e0b", krypto:"#d946ef" };
+
+function saveSettingsRaw(){ localStorage.setItem("inv_s", JSON.stringify(S)); }
+function savePortfolioRaw(){ localStorage.setItem("inv_p", JSON.stringify(P)); }
+function markChanged(){
+  META.lastChange = new Date().toISOString();
+  saveMeta();
+  scheduleAutoSync();
+}
+function saveSettings(){ saveSettingsRaw(); markChanged(); }
+function savePortfolio(){ savePortfolioRaw(); markChanged(); }
+function scheduleAutoSync(){
+  clearTimeout(autoSyncTimer);
+  autoSyncTimer = setTimeout(()=> syncToCloud(false), 1200); // debounce — počká, než dopíšeš, pak nahraje
+}
+function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
+function fmtCZK(n){ return (Math.round(n)).toLocaleString("cs-CZ") + " Kč"; }
+function fmtNum(n, d=2){ return Number(n).toLocaleString("cs-CZ", {minimumFractionDigits:0, maximumFractionDigits:d}); }
+function rateFor(cur){ return cur==="CZK" ? 1 : (S.rates[cur] || 1); }
+
+// ── VÝPOČTY NAD POZICÍ ──────────────────────────────────────────────────
+// Transakce u akcie/etf/krypto: {id, date, qty, price, note}  — qty záporné = prodej, price = cena za kus v měně pozice
+// Transakce u penzijní: {id, date, qty, price:1, note} — qty = vklad(+)/výběr(-) v Kč přímo
+function calcPosition(pos){
+  const txs = pos.transactions || [];
+  if(pos.type === "penzijni"){
+    const invested = txs.reduce((s,t)=> s + t.qty, 0); // v Kč
+    const currentValue = pos.currentValue != null ? Number(pos.currentValue) : invested;
+    return { qty: null, invested, currentValue, pnl: currentValue - invested, pnlPct: invested ? (currentValue-invested)/Math.abs(invested)*100 : 0 };
+  }
+  const rate = rateFor(pos.currency);
+  const qty = txs.reduce((s,t)=> s + t.qty, 0);
+  const investedNative = txs.reduce((s,t)=> s + t.qty * t.price, 0);
+  const invested = investedNative * rate;
+  const currentPrice = pos.currentPrice != null ? Number(pos.currentPrice) : 0;
+  const currentValue = qty * currentPrice * rate;
+  return { qty, invested, currentValue, pnl: currentValue - invested, pnlPct: invested ? (currentValue-invested)/Math.abs(invested)*100 : 0 };
+}
+function portfolioTotals(){
+  let invested = 0, currentValue = 0;
+  const byType = {};
+  P.positions.forEach(pos=>{
+    const c = calcPosition(pos);
+    invested += c.invested;
+    currentValue += c.currentValue;
+    byType[pos.type] = (byType[pos.type]||0) + c.currentValue;
+  });
+  return { invested, currentValue, pnl: currentValue-invested, pnlPct: invested ? (currentValue-invested)/Math.abs(invested)*100 : 0, byType };
+}
+
+// ── NAVIGACE ─────────────────────────────────────────────────────────────
+function showTab(tab){
+  currentTab = tab;
+  if(tab !== "portfolio") openPositionId = null;
+  document.querySelectorAll(".nav-btn").forEach(b=>b.classList.toggle("active", b.dataset.tab===tab));
+  render();
+}
+function render(){
+  const app = document.getElementById("app");
+  if(currentTab==="prehled") app.innerHTML = renderPrehled();
+  else if(currentTab==="portfolio") app.innerHTML = openPositionId ? renderPositionDetail(openPositionId) : renderPortfolio();
+  else if(currentTab==="ai") app.innerHTML = renderAI();
+  else if(currentTab==="admin") app.innerHTML = renderAdmin();
+}
+
+// ── PŘEHLED ─────────────────────────────────────────────────────────────
+function renderPrehled(){
+  if(P.positions.length === 0){
+    return `<div class="card">
+      <div class="card-title">Přehled portfolia</div>
+      <div class="empty-hint">Zatím nemáš žádné pozice.<br>Přidej je v záložce Portfolio 💼</div>
+    </div>`;
+  }
+  const t = portfolioTotals();
+  const pnlClass = t.pnl >= 0 ? "pnl-pos" : "pnl-neg";
+  const typeEntries = Object.entries(t.byType).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
+  const allocBars = typeEntries.map(([type,val])=>{
+    const pct = t.currentValue ? (val/t.currentValue*100) : 0;
+    return `<div class="alloc-seg" style="width:${pct}%;background:${TYPE_COLOR[type]}" title="${TYPE_LABEL[type]} ${pct.toFixed(0)}%"></div>`;
+  }).join("");
+  const allocList = typeEntries.map(([type,val])=>{
+    const pct = t.currentValue ? (val/t.currentValue*100) : 0;
+    return `<div class="row" style="margin-top:6px;font-size:12px">
+      <span><span class="type-badge type-${type}">${TYPE_LABEL[type]}</span></span>
+      <span style="color:#94a3b8">${fmtCZK(val)} · ${pct.toFixed(1)}%</span>
+    </div>`;
+  }).join("");
+
+  const posRows = [...P.positions].map(pos=>({pos, c: calcPosition(pos)}))
+    .sort((a,b)=> b.c.currentValue - a.c.currentValue)
+    .map(({pos,c})=>{
+      const pClass = c.pnl>=0 ? "pnl-pos" : "pnl-neg";
+      return `<div class="pos-item" onclick="showTab('portfolio');openPosition('${pos.id}')">
+        <div class="row">
+          <div>
+            <div class="pos-name">${pos.name}</div>
+            <div class="pos-meta"><span class="type-badge type-${pos.type}">${TYPE_LABEL[pos.type]}</span></div>
+          </div>
+          <div>
+            <div class="pos-value">${fmtCZK(c.currentValue)}</div>
+            <div class="pos-meta ${pClass}" style="text-align:right">${c.pnl>=0?'+':''}${fmtCZK(c.pnl)} (${c.pnlPct.toFixed(1)}%)</div>
+          </div>
+        </div>
+      </div>`;
+    }).join("");
+
+  return `
+  <div class="card">
+    <div class="card-title">Hodnota portfolia</div>
+    <div style="font-size:28px;font-weight:800;margin-top:6px">${fmtCZK(t.currentValue)}</div>
+    <div class="${pnlClass}" style="font-size:13px;font-weight:700;margin-top:2px">${t.pnl>=0?'+':''}${fmtCZK(t.pnl)} (${t.pnl>=0?'+':''}${t.pnlPct.toFixed(1)} %)</div>
+    <div class="grid2" style="margin-top:12px">
+      <div class="stat-box"><div class="stat-num">${fmtCZK(t.invested)}</div><div class="stat-lbl">VLOŽENO CELKEM</div></div>
+      <div class="stat-box"><div class="stat-num">${P.positions.length}</div><div class="stat-lbl">POČET POZIC</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Alokace podle třídy aktiv</div>
+    <div class="alloc-bar">${allocBars}</div>
+    ${allocList}
+  </div>
+
+  <div class="card">
+    <div class="card-title">Pozice</div>
+    ${posRows}
+  </div>
+
+  <div class="card">
+    <div class="card-sub">📌 Graf vývoje hodnoty v čase a srovnání s benchmarkem (S&amp;P 500) přidáme, jakmile budeme mít historická data z cenového API — zatím appka počítá jen aktuální stav podle ručně/automaticky zadaných cen.</div>
+  </div>`;
+}
+
+// ── PORTFOLIO — seznam pozic ────────────────────────────────────────────
+function renderPortfolio(){
+  const groups = {};
+  P.positions.forEach(pos=>{ (groups[pos.type] = groups[pos.type]||[]).push(pos); });
+  const order = ["akcie","etf","penzijni","krypto"];
+
+  let listHtml = "";
+  if(P.positions.length===0){
+    listHtml = `<div class="card"><div class="empty-hint">Zatím žádné pozice. Přidej první níže. 👇</div></div>`;
+  } else {
+    order.filter(t=>groups[t]).forEach(type=>{
+      const items = groups[type].map(pos=>{
+        const c = calcPosition(pos);
+        const pClass = c.pnl>=0 ? "pnl-pos" : "pnl-neg";
+        return `<div class="pos-item" onclick="openPosition('${pos.id}')">
+          <div class="row">
+            <div>
+              <div class="pos-name">${pos.name}</div>
+              <div class="pos-meta">${pos.ticker ? pos.ticker+" · " : ""}${pos.currency}</div>
+            </div>
+            <div>
+              <div class="pos-value">${fmtCZK(c.currentValue)}</div>
+              <div class="pos-meta ${pClass}" style="text-align:right">${c.pnl>=0?'+':''}${c.pnlPct.toFixed(1)}%</div>
+            </div>
+          </div>
+        </div>`;
+      }).join("");
+      listHtml += `<div class="card"><div class="card-title">${TYPE_LABEL[type]}</div>${items}</div>`;
+    });
+  }
+
+  return `${listHtml}
+  <div class="card">
+    <div class="card-title">➕ Přidat pozici</div>
+    <div class="field-label">Typ</div>
+    <select id="np-type" onchange="toggleNewPosCurrency()">
+      <option value="akcie">Akcie</option>
+      <option value="etf">ETF</option>
+      <option value="krypto">Kryptoměna</option>
+      <option value="penzijni">Penzijní spoření / fond</option>
+    </select>
+    <div class="field-label">Název</div>
+    <input id="np-name" placeholder="např. CEZ, VWCE, Bitcoin, Penzijko ČS">
+    <div class="field-label">Ticker (nepovinné)</div>
+    <input id="np-ticker" placeholder="např. CEZ.PR, VWCE.DE, BTC">
+    <div id="np-currency-wrap">
+      <div class="field-label">Měna</div>
+      <select id="np-currency">
+        <option value="CZK">CZK</option>
+        <option value="USD">USD</option>
+        <option value="EUR">EUR</option>
+      </select>
+    </div>
+    <button class="btn" onclick="addPosition()" style="width:100%;margin-top:10px;background:#166534">Přidat pozici</button>
+  </div>`;
+}
+function toggleNewPosCurrency(){
+  const type = document.getElementById("np-type").value;
+  document.getElementById("np-currency-wrap").style.display = type==="penzijni" ? "none" : "block";
+}
+function addPosition(){
+  const type = document.getElementById("np-type").value;
+  const name = document.getElementById("np-name").value.trim();
+  if(!name){ alert("Zadej název pozice."); return; }
+  const ticker = document.getElementById("np-ticker").value.trim();
+  const currency = type==="penzijni" ? "CZK" : document.getElementById("np-currency").value;
+  const pos = { id: uid(), type, name, ticker, currency, currentPrice: null, currentValue: null, transactions: [] };
+  P.positions.push(pos);
+  savePortfolio();
+  openPosition(pos.id);
+}
+function deletePosition(id){
+  if(!confirm("Opravdu smazat tuto pozici včetně všech transakcí?")) return;
+  P.positions = P.positions.filter(p=>p.id!==id);
+  savePortfolio();
+  openPositionId = null;
+  render();
+}
+function openPosition(id){ openPositionId = id; render(); }
+function closePosition(){ openPositionId = null; render(); }
+
+// ── DETAIL POZICE ───────────────────────────────────────────────────────
+function renderPositionDetail(id){
+  const pos = P.positions.find(p=>p.id===id);
+  if(!pos){ openPositionId=null; return renderPortfolio(); }
+  const c = calcPosition(pos);
+  const pClass = c.pnl>=0 ? "pnl-pos" : "pnl-neg";
+  const isPenzijni = pos.type === "penzijni";
+
+  const txRows = [...(pos.transactions||[])].sort((a,b)=> b.date.localeCompare(a.date)).map(t=>{
+    const label = isPenzijni
+      ? (t.qty>=0 ? `+${fmtCZK(t.qty)} vklad` : `${fmtCZK(t.qty)} výběr`)
+      : `${t.qty>=0?'nákup':'prodej'} ${fmtNum(Math.abs(t.qty),4)} ks × ${fmtNum(t.price)} ${pos.currency}`;
+    return `<div class="tx-row">
+      <span>${t.date} — ${label}${t.note?` <span style="color:#475569">(${t.note})</span>`:""}</span>
+      <button class="tx-del" onclick="deleteTx('${pos.id}','${t.id}')">✕</button>
+    </div>`;
+  }).join("") || `<div class="empty-hint">Zatím žádné transakce.</div>`;
+
+  const currentValueField = isPenzijni
+    ? `<div class="field-label">Aktuální stav (Kč, ze zůstatku/výpisu)</div>
+       <div class="row"><input id="pd-currentvalue" type="number" step="0.01" value="${pos.currentValue ?? c.invested}"><button class="btn-sm" style="background:#334155" onclick="updateCurrentValue('${pos.id}')">Uložit</button></div>`
+    : `<div class="field-label">Aktuální cena za kus (${pos.currency})</div>
+       <div class="row"><input id="pd-currentprice" type="number" step="0.0001" value="${pos.currentPrice ?? ''}" placeholder="zadej ručně, později auto"><button class="btn-sm" style="background:#334155" onclick="updateCurrentPrice('${pos.id}')">Uložit</button></div>`;
+
+  const txForm = isPenzijni
+    ? `<div class="field-label">Datum</div><input id="tx-date" type="date" value="${localISODate(new Date())}">
+       <div class="field-label">Částka (Kč) — kladná = vklad, záporná = výběr</div><input id="tx-amount" type="number" step="0.01" placeholder="např. 2000 nebo -1000">
+       <div class="field-label">Poznámka (nepovinné)</div><input id="tx-note">`
+    : `<div class="field-label">Datum</div><input id="tx-date" type="date" value="${localISODate(new Date())}">
+       <div class="row">
+         <div style="flex:1"><div class="field-label">Typ</div><select id="tx-kind"><option value="buy">Nákup</option><option value="sell">Prodej</option></select></div>
+       </div>
+       <div class="field-label">Počet kusů</div><input id="tx-qty" type="number" step="0.0001" placeholder="např. 10">
+       <div class="field-label">Cena za kus (${pos.currency})</div><input id="tx-price" type="number" step="0.0001" placeholder="např. 1250">
+       <div class="field-label">Poznámka (nepovinné)</div><input id="tx-note">`;
+
+  return `
+  <div class="card">
+    <button class="backlink" onclick="closePosition()">← Zpět na Portfolio</button>
+    <div class="row">
+      <div>
+        <div class="card-title">${pos.name}</div>
+        <div class="pos-meta"><span class="type-badge type-${pos.type}">${TYPE_LABEL[pos.type]}</span> ${pos.ticker?(" · "+pos.ticker):""} ${!isPenzijni?(" · "+pos.currency):""}</div>
+      </div>
+      <button class="btn-sm" style="background:#7f1d1d" onclick="deletePosition('${pos.id}')">🗑</button>
+    </div>
+    <div class="grid2" style="margin-top:12px">
+      <div class="stat-box"><div class="stat-num">${fmtCZK(c.currentValue)}</div><div class="stat-lbl">AKTUÁLNÍ HODNOTA</div></div>
+      <div class="stat-box"><div class="stat-num ${pClass}">${c.pnl>=0?'+':''}${fmtCZK(c.pnl)}</div><div class="stat-lbl">ZISK/ZTRÁTA (${c.pnlPct.toFixed(1)}%)</div></div>
+    </div>
+    ${!isPenzijni ? `<div class="pos-meta" style="margin-top:8px">Držíš: ${fmtNum(c.qty,4)} ks · Vloženo: ${fmtCZK(c.invested)}</div>` : `<div class="pos-meta" style="margin-top:8px">Vloženo celkem: ${fmtCZK(c.invested)}</div>`}
+  </div>
+
+  <div class="card">
+    <div class="card-title">Aktuální ${isPenzijni?'stav':'cena'}</div>
+    ${currentValueField}
+  </div>
+
+  <div class="card">
+    <div class="card-title">➕ ${isPenzijni ? 'Přidat vklad/výběr' : 'Přidat transakci'}</div>
+    ${txForm}
+    <button class="btn" onclick="addTx('${pos.id}')" style="width:100%;margin-top:10px;background:#166534">Přidat</button>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Historie</div>
+    ${txRows}
+  </div>`;
+}
+function localISODate(dt){
+  return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")}`;
+}
+function updateCurrentPrice(id){
+  const pos = P.positions.find(p=>p.id===id); if(!pos) return;
+  const v = parseFloat(document.getElementById("pd-currentprice").value);
+  pos.currentPrice = isNaN(v) ? null : v;
+  savePortfolio(); render();
+}
+function updateCurrentValue(id){
+  const pos = P.positions.find(p=>p.id===id); if(!pos) return;
+  const v = parseFloat(document.getElementById("pd-currentvalue").value);
+  pos.currentValue = isNaN(v) ? null : v;
+  savePortfolio(); render();
+}
+function addTx(id){
+  const pos = P.positions.find(p=>p.id===id); if(!pos) return;
+  const date = document.getElementById("tx-date").value || localISODate(new Date());
+  const note = document.getElementById("tx-note").value.trim();
+  if(pos.type === "penzijni"){
+    const amount = parseFloat(document.getElementById("tx-amount").value);
+    if(isNaN(amount) || amount===0){ alert("Zadej platnou částku."); return; }
+    pos.transactions.push({ id: uid(), date, qty: amount, price: 1, note });
+  } else {
+    const kind = document.getElementById("tx-kind").value;
+    let qty = parseFloat(document.getElementById("tx-qty").value);
+    const price = parseFloat(document.getElementById("tx-price").value);
+    if(isNaN(qty) || qty<=0 || isNaN(price) || price<=0){ alert("Zadej platný počet kusů a cenu."); return; }
+    if(kind==="sell") qty = -qty;
+    pos.transactions.push({ id: uid(), date, qty, price, note });
+  }
+  savePortfolio(); render();
+}
+function deleteTx(posId, txId){
+  const pos = P.positions.find(p=>p.id===posId); if(!pos) return;
+  pos.transactions = pos.transactions.filter(t=>t.id!==txId);
+  savePortfolio(); render();
+}
+
+// ── AI ───────────────────────────────────────────────────────────────────
+function renderAI(){
+  return `<div class="card">
+    <div class="card-title">AI poradce</div>
+    <div class="field-label">Dotaz</div>
+    <textarea id="ai-q" rows="3" placeholder="Zeptej se na cokoliv o portfoliu..."></textarea>
+    <button class="btn" onclick="askAI()" style="width:100%;margin-top:8px;background:#1e40af">Zeptat se</button>
+    <div id="ai-response" style="margin-top:12px"></div>
+  </div>`;
+}
+function portfolioSummaryForAI(){
+  const t = portfolioTotals();
+  const lines = P.positions.map(pos=>{
+    const c = calcPosition(pos);
+    return `- ${pos.name} (${TYPE_LABEL[pos.type]}${pos.ticker?`, ${pos.ticker}`:""}): hodnota ${Math.round(c.currentValue)} Kč, vloženo ${Math.round(c.invested)} Kč, P/L ${c.pnlPct.toFixed(1)}%`;
+  }).join("\n");
+  return `Celková hodnota portfolia: ${Math.round(t.currentValue)} Kč. Vloženo: ${Math.round(t.invested)} Kč. Celkové P/L: ${t.pnlPct.toFixed(1)}%.\nPozice:\n${lines}`;
+}
+async function askAI(){
+  const q = document.getElementById("ai-q")?.value?.trim();
+  if(!q) return;
+  if(!S.workerUrl){ alert("Nejdřív nastav Worker URL v Adminu."); return; }
+  const rb = document.getElementById("ai-response");
+  if(rb) rb.innerHTML = `<div class="card-sub">⏳ Přemýšlím...</div>`;
+  try{
+    const contextBlock = P.positions.length ? `\n\nKontext aktuálního portfolia uživatele:\n${portfolioSummaryForAI()}` : "";
+    const res = await fetch(S.workerUrl, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ system: S.sysPrompt + contextBlock, messages:[{role:"user", content:q}] })
+    });
+    const data = await res.json();
+    const text = data.content?.[0]?.text || (data.error ? `❌ Chyba: ${data.error.message||data.error}` : "Prázdná odpověď.");
+    if(rb) rb.innerHTML = `<div class="card" style="background:#0a1628;margin:0"><div style="white-space:pre-wrap;font-size:13px;line-height:1.6">${text}</div></div>`;
+  }catch(e){
+    if(rb) rb.innerHTML = `<div style="color:#ef4444;font-size:12px">❌ ${e.message}</div>`;
+  }
+}
+
+// ── ADMIN ────────────────────────────────────────────────────────────────
+function renderAdmin(){
+  return `<div class="card">
+    <div class="card-title">Nastavení</div>
+    <div class="field-label">Jméno</div>
+    <input id="s-name" value="${S.name}">
+    <div class="field-label">Cloudflare Worker URL (AI + cloud sync)</div>
+    <input id="s-worker" value="${S.workerUrl}" placeholder="https://tvuj-worker.workers.dev">
+    <div class="field-label">AI systémový prompt</div>
+    <textarea id="s-prompt" rows="2">${S.sysPrompt}</textarea>
+    <button class="btn" onclick="saveAdminForm()" style="width:100%;margin-top:10px;background:#166534">💾 Uložit</button>
+    <button class="btn" onclick="syncFromCloud()" style="width:100%;margin-top:8px;background:#334155">🔄 Sync z cloudu</button>
+    <button class="btn" onclick="syncToCloud(true)" style="width:100%;margin-top:8px;background:#334155">☁️ Sync do cloudu</button>
+    <div id="sync-info" style="font-size:11px;color:#64748b;margin-top:8px"></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Kurzy měn → CZK</div>
+    <div class="card-sub">Zatím ruční zadávání. Později napojíme na ČNB API.</div>
+    <div class="field-label">1 USD = ? CZK</div>
+    <input id="s-usd" type="number" step="0.01" value="${S.rates.USD}">
+    <div class="field-label">1 EUR = ? CZK</div>
+    <input id="s-eur" type="number" step="0.01" value="${S.rates.EUR}">
+    <button class="btn" onclick="saveRates()" style="width:100%;margin-top:10px;background:#166534">💾 Uložit kurzy</button>
+  </div>`;
+}
+function saveAdminForm(){
+  S.name = document.getElementById("s-name").value;
+  S.workerUrl = document.getElementById("s-worker").value.trim();
+  S.sysPrompt = document.getElementById("s-prompt").value;
+  saveSettings();
+  document.getElementById("hdr-name").textContent = S.name || "Investiční Dashboard";
+  alert("Uloženo.");
+}
+function saveRates(){
+  const usd = parseFloat(document.getElementById("s-usd").value);
+  const eur = parseFloat(document.getElementById("s-eur").value);
+  if(!isNaN(usd)) S.rates.USD = usd;
+  if(!isNaN(eur)) S.rates.EUR = eur;
+  saveSettings();
+  alert("Kurzy uloženy.");
+}
+
+// ── CLOUD SYNC (KV přes Worker) ─────────────────────────────────────────
+// Auto-upload: po každé změně (viz markChanged/scheduleAutoSync) se stav potichu
+// nahraje do cloudu. Auto-download: při startu appky (viz initSync) se stáhne
+// poslední cloudová verze, ALE jen pokud je novější než lokální data — jinak
+// bychom mobilem přepsali čerstvě zadané věci z počítače a naopak.
+function updateHeaderSub(status){
+  const el = document.getElementById("hdr-sub");
+  if(el) el.textContent = status;
+}
+async function syncToCloud(manual){
+  if(!S.workerUrl) { if(manual) alert("Nejdřív nastav Worker URL."); return; }
+  const el = document.getElementById("sync-info");
+  if(manual && el) el.textContent = "⏳ Nahrávám do cloudu...";
+  if(syncInFlight) return;
+  syncInFlight = true;
+  try{
+    const ts = META.lastChange || new Date().toISOString();
+    await fetch(S.workerUrl, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ action:"kv_set", key:"invest_sync", value:{ settings:S, portfolio:P, ts } })
+    });
+    if(manual && el) el.textContent = "✅ Nahráno do cloudu · " + new Date().toLocaleString("cs-CZ");
+    updateHeaderSub("☁️ Synchronizováno · " + new Date().toLocaleTimeString("cs-CZ", {hour:'2-digit', minute:'2-digit'}));
+  }catch(e){
+    if(manual && el) el.textContent = "❌ " + e.message;
+    updateHeaderSub("⚠️ Sync se nepovedl (offline?)");
+  }finally{
+    syncInFlight = false;
+  }
+}
+async function syncFromCloud(manual=true){
+  const el = document.getElementById("sync-info");
+  if(!S.workerUrl){ if(manual && el) el.textContent = "Nastav nejdřív Worker URL."; return; }
+  if(manual && el) el.textContent = "⏳ Synchronizuji...";
+  try{
+    const res = await fetch(S.workerUrl, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ action:"kv_get", key:"invest_sync" })
+    });
+    const data = await res.json();
+    const remote = data.value;
+    if(remote?.settings || remote?.portfolio){
+      if(remote.settings) S = {...S, ...remote.settings, rates:{...S.rates, ...(remote.settings.rates||{})}};
+      if(remote.portfolio) P = remote.portfolio;
+      saveSettingsRaw(); savePortfolioRaw();
+      META.lastChange = remote.ts; saveMeta();
+      if(manual && el) el.textContent = "✅ Sync OK · " + new Date(remote.ts).toLocaleString("cs-CZ");
+      render();
+      document.getElementById("hdr-name").textContent = S.name || "Investiční Dashboard";
+      updateHeaderSub("☁️ Staženo z cloudu · " + new Date(remote.ts).toLocaleTimeString("cs-CZ", {hour:'2-digit', minute:'2-digit'}));
+      return true;
+    }else{
+      if(manual && el) el.textContent = "☁️ V cloudu zatím nic není.";
+      return false;
+    }
+  }catch(e){
+    if(manual && el) el.textContent = "❌ " + e.message;
+    updateHeaderSub("⚠️ Sync se nepovedl (offline?)");
+    return false;
+  }
+}
+
+// Zavolá se při startu appky. Porovná čas poslední lokální změny s časem
+// dat v cloudu a použije to novější — buď stáhne, nebo naopak nahraje.
+async function initSync(){
+  if(!S.workerUrl) return; // bez Worker URL sync nedává smysl, appka funguje jen lokálně
+  try{
+    const res = await fetch(S.workerUrl, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ action:"kv_get", key:"invest_sync" })
+    });
+    const data = await res.json();
+    const remote = data.value;
+    const localTs = META.lastChange ? new Date(META.lastChange).getTime() : 0;
+    const remoteTs = remote?.ts ? new Date(remote.ts).getTime() : 0;
+
+    if(remoteTs > localTs){
+      if(remote.settings) S = {...S, ...remote.settings, rates:{...S.rates, ...(remote.settings.rates||{})}};
+      if(remote.portfolio) P = remote.portfolio;
+      saveSettingsRaw(); savePortfolioRaw();
+      META.lastChange = remote.ts; saveMeta();
+      document.getElementById("hdr-name").textContent = S.name || "Investiční Dashboard";
+      render();
+      updateHeaderSub("☁️ Staženo z cloudu · " + new Date(remote.ts).toLocaleTimeString("cs-CZ", {hour:'2-digit', minute:'2-digit'}));
+    } else if(localTs > remoteTs){
+      await syncToCloud(false);
+    } else if(remoteTs){
+      updateHeaderSub("☁️ Synchronizováno");
+    }
+  }catch(e){
+    updateHeaderSub("⚠️ Offline — pracuji jen s lokálními daty");
+  }
+}
+
+// ── PWA REGISTRACE ──────────────────────────────────────────────────────
+if("serviceWorker" in navigator){
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").catch(()=>{});
+  });
+}
+
+// ── START ────────────────────────────────────────────────────────────────
+document.getElementById("hdr-name").textContent = S.name || "Investiční Dashboard";
+showTab("prehled"); // okamžité vykreslení z lokálních dat, ať appka nečeká na síť
+initSync(); // na pozadí zkontroluje/stáhne/nahraje cloud a případně překreslí
+</script>
+</body>
+</html>
