@@ -19,6 +19,9 @@
   .btn{padding:10px 14px;border-radius:10px;border:none;color:#e2e8f0;font-size:13px;font-weight:700;cursor:pointer}
   .btn-sm{padding:6px 10px;font-size:12px;border-radius:8px;border:none;font-weight:700;cursor:pointer}
   input,textarea,select{width:100%;background:#0f172a;border:1px solid #334155;border-radius:8px;color:#e2e8f0;font-size:13px;padding:8px 10px;font-family:inherit}
+  input[type="date"]{ color-scheme: dark; }
+  input[type="date"]::-webkit-calendar-picker-indicator{ filter: invert(0.85); cursor:pointer; padding:4px; border-radius:6px }
+  input[type="date"]::-webkit-calendar-picker-indicator:hover{ background:#1e293b }
   .field-label{font-size:11px;color:#64748b;margin:8px 0 4px}
   .header{padding:16px;display:flex;align-items:center;gap:10px}
   .bottom-nav{position:fixed;bottom:0;left:0;right:0;background:#0f172a;border-top:1px solid #1e293b;display:flex;justify-content:space-around;padding:6px 0;padding-bottom:calc(6px + env(safe-area-inset-bottom));z-index:50}
@@ -91,6 +94,8 @@ function saveMeta(){ localStorage.setItem("inv_meta", JSON.stringify(META)); }
 
 let currentTab = "prehled";
 let openPositionId = null; // když je nastaveno, portfolio tab zobrazuje detail pozice
+let addPositionFormOpen = false; // sbalený/rozbalený formulář "Přidat pozici"
+let addTxFormOpen = false; // sbalený/rozbalený formulář "Přidat transakci" v detailu pozice
 let autoSyncTimer = null;
 let syncInFlight = false;
 
@@ -259,9 +264,7 @@ function renderPortfolio(){
     });
   }
 
-  return `${listHtml}
-  <div class="card">
-    <div class="card-title">➕ Přidat pozici</div>
+  const addPositionBody = addPositionFormOpen ? `
     <div class="field-label">Typ</div>
     <select id="np-type" onchange="toggleNewPosCurrency()">
       <option value="akcie">Akcie</option>
@@ -281,9 +284,15 @@ function renderPortfolio(){
         <option value="EUR">EUR</option>
       </select>
     </div>
-    <button class="btn" onclick="addPosition()" style="width:100%;margin-top:10px;background:#166534">Přidat pozici</button>
+    <button class="btn" onclick="addPosition()" style="width:100%;margin-top:10px;background:#166534">Přidat pozici</button>` : "";
+
+  return `${listHtml}
+  <div class="card">
+    <div class="card-title" style="cursor:pointer" onclick="toggleAddPositionForm()">${addPositionFormOpen?'➖':'➕'} Přidat pozici</div>
+    ${addPositionBody}
   </div>`;
 }
+function toggleAddPositionForm(){ addPositionFormOpen = !addPositionFormOpen; render(); }
 function toggleNewPosCurrency(){
   const type = document.getElementById("np-type").value;
   document.getElementById("np-currency-wrap").style.display = type==="penzijni" ? "none" : "block";
@@ -297,6 +306,7 @@ function addPosition(){
   const pos = { id: uid(), type, name, ticker, currency, currentPrice: null, currentValue: null, transactions: [] };
   P.positions.push(pos);
   savePortfolio();
+  addPositionFormOpen = false;
   openPosition(pos.id);
 }
 function deletePosition(id){
@@ -306,7 +316,7 @@ function deletePosition(id){
   openPositionId = null;
   render();
 }
-function openPosition(id){ openPositionId = id; render(); }
+function openPosition(id){ openPositionId = id; addTxFormOpen = false; render(); }
 function closePosition(){ openPositionId = null; render(); }
 
 // ── DETAIL POZICE ───────────────────────────────────────────────────────
@@ -333,7 +343,7 @@ function renderPositionDetail(id){
     : `<div class="field-label">Aktuální cena za kus (${pos.currency})</div>
        <div class="row"><input id="pd-currentprice" type="number" step="0.0001" value="${pos.currentPrice ?? ''}" placeholder="zadej ručně, později auto"><button class="btn-sm" style="background:#334155" onclick="updateCurrentPrice('${pos.id}')">Uložit</button></div>`;
 
-  const txForm = isPenzijni
+  const txFormFields = isPenzijni
     ? `<div class="field-label">Datum</div><input id="tx-date" type="date" value="${localISODate(new Date())}">
        <div class="field-label">Částka (Kč) — kladná = vklad, záporná = výběr</div><input id="tx-amount" type="number" step="0.01" placeholder="např. 2000 nebo -1000">
        <div class="field-label">Poznámka (nepovinné)</div><input id="tx-note">`
@@ -344,6 +354,8 @@ function renderPositionDetail(id){
        <div class="field-label">Počet kusů</div><input id="tx-qty" type="number" step="0.0001" placeholder="např. 10">
        <div class="field-label">Cena za kus (${pos.currency})</div><input id="tx-price" type="number" step="0.0001" placeholder="např. 1250">
        <div class="field-label">Poznámka (nepovinné)</div><input id="tx-note">`;
+  const txForm = addTxFormOpen ? `${txFormFields}
+       <button class="btn" onclick="addTx('${pos.id}')" style="width:100%;margin-top:10px;background:#166534">Přidat</button>` : "";
 
   return `
   <div class="card">
@@ -368,9 +380,8 @@ function renderPositionDetail(id){
   </div>
 
   <div class="card">
-    <div class="card-title">➕ ${isPenzijni ? 'Přidat vklad/výběr' : 'Přidat transakci'}</div>
+    <div class="card-title" style="cursor:pointer" onclick="toggleAddTxForm()">${addTxFormOpen?'➖':'➕'} ${isPenzijni ? 'Přidat vklad/výběr' : 'Přidat transakci'}</div>
     ${txForm}
-    <button class="btn" onclick="addTx('${pos.id}')" style="width:100%;margin-top:10px;background:#166534">Přidat</button>
   </div>
 
   <div class="card">
@@ -378,6 +389,7 @@ function renderPositionDetail(id){
     ${txRows}
   </div>`;
 }
+function toggleAddTxForm(){ addTxFormOpen = !addTxFormOpen; render(); }
 function localISODate(dt){
   return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")}`;
 }
