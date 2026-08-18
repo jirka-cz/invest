@@ -42,6 +42,7 @@
   .type-etf{background:#164e63;color:#67e8f9}
   .type-penzijni{background:#3f2d1e;color:#fbbf24}
   .type-krypto{background:#3f1e3f;color:#e9a3e9}
+  .type-fond{background:#1e3f35;color:#5eead4}
   .tx-row{display:flex;justify-content:space-between;font-size:12px;padding:8px 0;border-bottom:1px solid #1e293b}
   .tx-row:last-child{border-bottom:none}
   .tx-del{color:#ef4444;background:none;border:none;font-size:12px;cursor:pointer;padding:0 0 0 8px}
@@ -103,8 +104,8 @@ let editPosMetaOpen = false; // sbalený/rozbalený formulář úpravy názvu/ti
 let autoSyncTimer = null;
 let syncInFlight = false;
 
-const TYPE_LABEL = { akcie:"Akcie", etf:"ETF", penzijni:"Penzijní spoření", krypto:"Kryptoměny" };
-const TYPE_COLOR = { akcie:"#3b82f6", etf:"#06b6d4", penzijni:"#f59e0b", krypto:"#d946ef" };
+const TYPE_LABEL = { akcie:"Akcie", etf:"ETF", penzijni:"Penzijní spoření", krypto:"Kryptoměny", fond:"Investiční fond (OTC)" };
+const TYPE_COLOR = { akcie:"#3b82f6", etf:"#06b6d4", penzijni:"#f59e0b", krypto:"#d946ef", fond:"#14b8a6" };
 
 function saveSettingsRaw(){ localStorage.setItem("inv_s", JSON.stringify(S)); }
 function savePortfolioRaw(){ localStorage.setItem("inv_p", JSON.stringify(P)); }
@@ -265,7 +266,7 @@ function renderPrehled(){
 function renderPortfolio(){
   const groups = {};
   P.positions.forEach(pos=>{ (groups[pos.type] = groups[pos.type]||[]).push(pos); });
-  const order = ["akcie","etf","penzijni","krypto"];
+  const order = ["akcie","etf","fond","penzijni","krypto"];
 
   let listHtml = "";
   if(P.positions.length===0){
@@ -297,15 +298,16 @@ function renderPortfolio(){
     <select id="np-type" onchange="toggleNewPosCurrency()">
       <option value="akcie">Akcie</option>
       <option value="etf">ETF</option>
+      <option value="fond">Investiční fond (OTC, mimo burzu — např. J&amp;T Fondy)</option>
       <option value="krypto">Kryptoměna</option>
-      <option value="penzijni">Penzijní spoření / fond</option>
+      <option value="penzijni">Penzijní spoření</option>
     </select>
     <div class="field-label">Název</div>
-    <input id="np-name" placeholder="např. CEZ, VWCE, Bitcoin, Penzijko ČS">
-    <div class="field-label">Ticker (nepovinné)</div>
-    <input id="np-ticker" placeholder="např. CEZ.PR, VWCE.DE, BTC">
-    <div class="field-label">ISIN (nepovinné)</div>
-    <input id="np-isin" placeholder="např. US5949181045" style="text-transform:uppercase">
+    <input id="np-name" placeholder="např. CEZ, VWCE, Bitcoin, J&T Global Index">
+    <div class="field-label">Ticker (nepovinné — burzovní titul, formát Stooq: CEZ.CZ / AAPL.US / VOD.UK)</div>
+    <input id="np-ticker" placeholder="např. CEZ.CZ, AAPL.US, VOD.UK">
+    <div class="field-label">ISIN (nepovinné — u OTC fondů podle něj appka dohledává cenu)</div>
+    <input id="np-isin" placeholder="např. CZ1005100386" style="text-transform:uppercase">
     <div id="np-currency-wrap">
       <div class="field-label">Měna</div>
       <select id="np-currency">
@@ -316,11 +318,49 @@ function renderPortfolio(){
     </div>
     <button class="btn" onclick="addPosition()" style="width:100%;margin-top:10px;background:#166534">Přidat pozici</button>` : "";
 
-  return `${listHtml}
+  return `
+  <div class="card">
+    <div class="row">
+      <div class="card-title">Ceny</div>
+    </div>
+    <button class="btn" onclick="refreshAllPrices()" style="width:100%;margin-top:8px;background:#1e40af">🔄 Aktualizovat všechny ceny</button>
+    <div id="prices-refresh-status" class="card-sub" style="margin-top:6px"></div>
+    <div class="card-sub" style="margin-top:6px">Zdroje: Stooq.com (akcie/ETF podle tickeru), Atlantik.cz (OTC fondy podle ISIN) — neoficiální bezplatné zdroje, občas se mohou dočasně rozbít.</div>
+  </div>
+  ${listHtml}
   <div class="card">
     <div class="card-title" style="cursor:pointer" onclick="toggleAddPositionForm()">${addPositionFormOpen?'➖':'➕'} Přidat pozici</div>
     ${addPositionBody}
   </div>`;
+}
+async function refreshAllPrices(){
+  if(!S.workerUrl){ alert("Nejdřív nastav Worker URL v Adminu."); return; }
+  const statusEl = document.getElementById("prices-refresh-status");
+  const updatable = P.positions.filter(p => p.type!=="penzijni" && ((p.type==="fond" && p.isin) || (p.type!=="fond" && p.ticker)));
+  if(updatable.length===0){ if(statusEl) statusEl.textContent = "Žádné pozice s tickerem (akcie/ETF/krypto) nebo ISIN (OTC fond) k aktualizaci."; return; }
+  let ok=0, fail=0;
+  for(let i=0;i<updatable.length;i++){
+    const pos = updatable[i];
+    if(statusEl) statusEl.textContent = `⏳ Aktualizuji ${pos.name}... (${i+1}/${updatable.length})`;
+    try{
+      let res, data;
+      if(pos.type === "fond"){
+        res = await fetch(S.workerUrl, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ action:"price_fund_atlantik", isin: pos.isin }) });
+      } else {
+        res = await fetch(S.workerUrl, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ action:"price_stooq", symbol: pos.ticker }) });
+      }
+      data = await res.json();
+      if(data.price){
+        pos.currentPrice = data.price;
+        pos.currentPriceDate = data.date || localISODate(new Date());
+        ok++;
+      } else fail++;
+    }catch(e){ fail++; }
+  }
+  savePortfolio();
+  render();
+  const statusEl2 = document.getElementById("prices-refresh-status");
+  if(statusEl2) statusEl2.textContent = `✅ Aktualizováno: ${ok} · Nepodařilo se: ${fail} (${new Date().toLocaleTimeString("cs-CZ",{hour:'2-digit',minute:'2-digit'})})`;
 }
 function toggleAddPositionForm(){ addPositionFormOpen = !addPositionFormOpen; render(); }
 function toggleNewPosCurrency(){
@@ -402,7 +442,8 @@ function renderPositionDetail(id){
     ? `<div class="field-label">Aktuální stav (Kč, ze zůstatku/výpisu)</div>
        <div class="row"><input id="pd-currentvalue" type="number" step="0.01" value="${pos.currentValue ?? c.invested}"><button class="btn-sm" style="background:#334155" onclick="updateCurrentValue('${pos.id}')">Uložit</button></div>`
     : `<div class="field-label">Aktuální cena za kus (${nativeCur})</div>
-       <div class="row"><input id="pd-currentprice" type="number" step="0.0001" value="${pos.currentPrice ?? ''}" placeholder="zadej ručně, později auto"><button class="btn-sm" style="background:#334155" onclick="updateCurrentPrice('${pos.id}')">Uložit</button></div>
+       <div class="row"><input id="pd-currentprice" type="number" step="0.0001" value="${pos.currentPrice ?? ''}" placeholder="${pos.type==='fond' ? 'zadej ručně nebo dohledej podle ISIN' : 'zadej ručně nebo dohledej podle tickeru'}"><button class="btn-sm" style="background:#334155" onclick="updateCurrentPrice('${pos.id}')">Uložit</button></div>
+       ${pos.currentPriceDate ? `<div class="pos-meta" style="margin-top:4px">Naposledy staženo automaticky: ${pos.currentPriceDate}</div>` : ''}
        ${nativeCur!=="CZK" ? `<div class="pos-meta" style="margin-top:6px">Aktuální kurz ${nativeCur}/CZK: ${fmtNum(rateFor(nativeCur),3)} ${S.liveRates[nativeCur]?(' · ČNB k '+S.liveRates[nativeCur].date):' (záložní, ruční)'} <button class="btn-sm" style="background:#334155;padding:2px 8px;margin-left:6px" onclick="refreshLiveRate('${nativeCur}')">🔄</button></div>` : ''}`;
 
   const txFormFields = isPenzijni
@@ -498,6 +539,7 @@ function updateCurrentPrice(id){
   const pos = P.positions.find(p=>p.id===id); if(!pos) return;
   const v = parseFloat(document.getElementById("pd-currentprice").value);
   pos.currentPrice = isNaN(v) ? null : v;
+  pos.currentPriceDate = null; // ruční zadání přepisuje případnou automatickou hodnotu
   savePortfolio(); render();
 }
 function updateCurrentValue(id){
