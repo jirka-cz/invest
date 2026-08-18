@@ -543,10 +543,10 @@ async function syncFromCloud(manual=true){
       if(remote.portfolio) P = remote.portfolio;
       saveSettingsRaw(); savePortfolioRaw();
       META.lastChange = remote.ts; saveMeta();
-      if(manual && el) el.textContent = "✅ Sync OK · " + new Date(remote.ts).toLocaleString("cs-CZ");
-      render();
+      render(); // překreslí Admin tab — VŽDY před zápisem hlášky, jinak se hláška smaže spolu se starým DOM
       document.getElementById("hdr-name").textContent = S.name || "Investiční Dashboard";
       updateHeaderSub("☁️ Staženo z cloudu · " + new Date(remote.ts).toLocaleTimeString("cs-CZ", {hour:'2-digit', minute:'2-digit'}));
+      if(manual){ const freshEl = document.getElementById("sync-info"); if(freshEl) freshEl.textContent = "✅ Sync OK · " + new Date(remote.ts).toLocaleString("cs-CZ"); }
       return true;
     }else{
       if(manual && el) el.textContent = "☁️ V cloudu zatím nic není.";
