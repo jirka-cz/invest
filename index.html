@@ -79,10 +79,11 @@
 const DEFAULT_S = {
   name:"", workerUrl:"",
   sysPrompt:"Jsi finanční poradce. Odpovídáš stručně, věcně, v češtině. Nedáváš konkrétní investiční doporučení jako autoritativní radu, spíš fakta a kontext k rozhodnutí uživatele.",
-  rates:{ USD: 23.5, EUR: 25.2 } // kolik CZK za 1 jednotku měny — zatím ruční, později napojíme na ČNB API
+  rates:{ USD: 23.5, EUR: 25.2 }, // záložní kurzy — použijí se, jen když se nepodaří stáhnout aktuální z ČNB
+  liveRates:{} // { USD:{rate, date}, EUR:{rate, date} } — naposledy stažené kurzy z ČNB
 };
 let S = JSON.parse(localStorage.getItem("inv_s") || "null") || {...DEFAULT_S};
-S = {...DEFAULT_S, ...S, rates:{...DEFAULT_S.rates, ...(S.rates||{})}};
+S = {...DEFAULT_S, ...S, rates:{...DEFAULT_S.rates, ...(S.rates||{})}, liveRates:{...(S.liveRates||{})}};
 
 const DEFAULT_P = { positions: [] };
 let P = JSON.parse(localStorage.getItem("inv_p") || "null") || {...DEFAULT_P};
@@ -96,6 +97,7 @@ let currentTab = "prehled";
 let openPositionId = null; // když je nastaveno, portfolio tab zobrazuje detail pozice
 let addPositionFormOpen = false; // sbalený/rozbalený formulář "Přidat pozici"
 let addTxFormOpen = false; // sbalený/rozbalený formulář "Přidat transakci" v detailu pozice
+let posShowCZK = false; // v detailu pozice: false = nativní měna (obchodovací), true = přepočet na CZK
 let autoSyncTimer = null;
 let syncInFlight = false;
 
@@ -118,25 +120,49 @@ function scheduleAutoSync(){
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
 function fmtCZK(n){ return (Math.round(n)).toLocaleString("cs-CZ") + " Kč"; }
 function fmtNum(n, d=2){ return Number(n).toLocaleString("cs-CZ", {minimumFractionDigits:0, maximumFractionDigits:d}); }
-function rateFor(cur){ return cur==="CZK" ? 1 : (S.rates[cur] || 1); }
+function fmtMoney(n, cur){ return cur==="CZK" ? fmtCZK(n) : Number(n).toLocaleString("cs-CZ",{minimumFractionDigits:2,maximumFractionDigits:2}) + " " + cur; }
+function rateFor(cur){
+  if(cur==="CZK") return 1;
+  if(S.liveRates && S.liveRates[cur]) return S.liveRates[cur].rate;
+  return S.rates[cur] || 1;
+}
 
 // ── VÝPOČTY NAD POZICÍ ──────────────────────────────────────────────────
-// Transakce u akcie/etf/krypto: {id, date, qty, price, note}  — qty záporné = prodej, price = cena za kus v měně pozice
+// Transakce u akcie/etf/krypto: {id, date, qty, price, fee, fxRate, note}
+//   qty záporné = prodej, price = cena za kus v nativní měně pozice, fee = poplatek (nativní měna)
+//   fxRate = kurz CZK/nativní měna PLATNÝ K DATU TÉTO TRANSAKCE (dohledaný z ČNB nebo ručně)
 // Transakce u penzijní: {id, date, qty, price:1, note} — qty = vklad(+)/výběr(-) v Kč přímo
 function calcPosition(pos){
   const txs = pos.transactions || [];
   if(pos.type === "penzijni"){
-    const invested = txs.reduce((s,t)=> s + t.qty, 0); // v Kč
+    const invested = txs.reduce((s,t)=> s + t.qty, 0);
     const currentValue = pos.currentValue != null ? Number(pos.currentValue) : invested;
-    return { qty: null, invested, currentValue, pnl: currentValue - invested, pnlPct: invested ? (currentValue-invested)/Math.abs(invested)*100 : 0 };
+    return { qty:null, investedNative:invested, currentValueNative:currentValue,
+      invested, currentValue, pnl: currentValue-invested,
+      pnlPct: invested ? (currentValue-invested)/Math.abs(invested)*100 : 0,
+      pnlNative: currentValue-invested, pnlPctNative: invested ? (currentValue-invested)/Math.abs(invested)*100 : 0 };
   }
-  const rate = rateFor(pos.currency);
   const qty = txs.reduce((s,t)=> s + t.qty, 0);
-  const investedNative = txs.reduce((s,t)=> s + t.qty * t.price, 0);
-  const invested = investedNative * rate;
+  // nativní: prostý součet (kolik jsi reálně zaplatil/dostal v měně, ve které se cenný papír obchoduje)
+  const investedNative = txs.reduce((s,t)=> s + t.qty*t.price + (t.fee||0), 0);
   const currentPrice = pos.currentPrice != null ? Number(pos.currentPrice) : 0;
-  const currentValue = qty * currentPrice * rate;
-  return { qty, invested, currentValue, pnl: currentValue - invested, pnlPct: invested ? (currentValue-invested)/Math.abs(invested)*100 : 0 };
+  const currentValueNative = qty * currentPrice;
+  // CZK: každá transakce se přepočítává SVÝM VLASTNÍM kurzem k datu nákupu/prodeje —
+  // ne jedním aktuálním kurzem, aby starší nákupy nebyly zkreslené dnešním kurzem.
+  const investedCZK = pos.currency==="CZK" ? investedNative : txs.reduce((s,t)=>{
+    const r = t.fxRate || rateFor(pos.currency);
+    return s + (t.qty*t.price + (t.fee||0)) * r;
+  }, 0);
+  const liveRate = rateFor(pos.currency);
+  const currentValueCZK = currentValueNative * liveRate;
+  return {
+    qty, investedNative, currentValueNative,
+    invested: investedCZK, currentValue: currentValueCZK,
+    pnl: currentValueCZK - investedCZK,
+    pnlPct: investedCZK ? (currentValueCZK-investedCZK)/Math.abs(investedCZK)*100 : 0,
+    pnlNative: currentValueNative - investedNative,
+    pnlPctNative: investedNative ? (currentValueNative-investedNative)/Math.abs(investedNative)*100 : 0,
+  };
 }
 function portfolioTotals(){
   let invested = 0, currentValue = 0;
@@ -316,21 +342,46 @@ function deletePosition(id){
   openPositionId = null;
   render();
 }
-function openPosition(id){ openPositionId = id; addTxFormOpen = false; render(); }
+function openPosition(id){ openPositionId = id; addTxFormOpen = false; posShowCZK = false; render(); }
 function closePosition(){ openPositionId = null; render(); }
+function setPosCurrency(showCZK){ posShowCZK = showCZK; render(); }
 
 // ── DETAIL POZICE ───────────────────────────────────────────────────────
 function renderPositionDetail(id){
   const pos = P.positions.find(p=>p.id===id);
   if(!pos){ openPositionId=null; return renderPortfolio(); }
   const c = calcPosition(pos);
-  const pClass = c.pnl>=0 ? "pnl-pos" : "pnl-neg";
   const isPenzijni = pos.type === "penzijni";
+  const nativeCur = pos.currency;
+  const showCZK = posShowCZK || nativeCur === "CZK";
+  const dispCur = showCZK ? "CZK" : nativeCur;
+  const dispInvested = showCZK ? c.invested : c.investedNative;
+  const dispCurrentValue = showCZK ? c.currentValue : c.currentValueNative;
+  const dispPnl = showCZK ? c.pnl : c.pnlNative;
+  const dispPnlPct = showCZK ? c.pnlPct : c.pnlPctNative;
+  const pClass = dispPnl>=0 ? "pnl-pos" : "pnl-neg";
+
+  const currencyToggle = (!isPenzijni && nativeCur !== "CZK") ? `
+    <div class="row" style="margin-top:10px;gap:6px">
+      <button class="btn-sm" style="flex:1;background:${!posShowCZK?'#7c3aed':'#334155'}" onclick="setPosCurrency(false)">${nativeCur} (nativní)</button>
+      <button class="btn-sm" style="flex:1;background:${posShowCZK?'#7c3aed':'#334155'}" onclick="setPosCurrency(true)">CZK (přepočet)</button>
+    </div>` : "";
 
   const txRows = [...(pos.transactions||[])].sort((a,b)=> b.date.localeCompare(a.date)).map(t=>{
-    const label = isPenzijni
-      ? (t.qty>=0 ? `+${fmtCZK(t.qty)} vklad` : `${fmtCZK(t.qty)} výběr`)
-      : `${t.qty>=0?'nákup':'prodej'} ${fmtNum(Math.abs(t.qty),4)} ks × ${fmtNum(t.price)} ${pos.currency}`;
+    let label;
+    if(isPenzijni){
+      label = t.qty>=0 ? `+${fmtCZK(t.qty)} vklad` : `${fmtCZK(t.qty)} výběr`;
+    } else {
+      const kindLabel = t.qty>=0?'nákup':'prodej';
+      const feeStr = t.fee ? ` + poplatek ${fmtMoney(t.fee, nativeCur)}` : '';
+      if(showCZK && nativeCur !== "CZK"){
+        const r = t.fxRate || rateFor(nativeCur);
+        const czkAmt = (Math.abs(t.qty)*t.price + (t.fee||0)) * r;
+        label = `${kindLabel} ${fmtNum(Math.abs(t.qty),4)} ks × ${fmtNum(t.price)} ${nativeCur}${feeStr} → <b>${fmtCZK(czkAmt)}</b> <span style="color:#475569">(kurz ${fmtNum(r,3)})</span>`;
+      } else {
+        label = `${kindLabel} ${fmtNum(Math.abs(t.qty),4)} ks × ${fmtNum(t.price)} ${nativeCur}${feeStr}`;
+      }
+    }
     return `<div class="tx-row">
       <span>${t.date} — ${label}${t.note?` <span style="color:#475569">(${t.note})</span>`:""}</span>
       <button class="tx-del" onclick="deleteTx('${pos.id}','${t.id}')">✕</button>
@@ -340,19 +391,24 @@ function renderPositionDetail(id){
   const currentValueField = isPenzijni
     ? `<div class="field-label">Aktuální stav (Kč, ze zůstatku/výpisu)</div>
        <div class="row"><input id="pd-currentvalue" type="number" step="0.01" value="${pos.currentValue ?? c.invested}"><button class="btn-sm" style="background:#334155" onclick="updateCurrentValue('${pos.id}')">Uložit</button></div>`
-    : `<div class="field-label">Aktuální cena za kus (${pos.currency})</div>
-       <div class="row"><input id="pd-currentprice" type="number" step="0.0001" value="${pos.currentPrice ?? ''}" placeholder="zadej ručně, později auto"><button class="btn-sm" style="background:#334155" onclick="updateCurrentPrice('${pos.id}')">Uložit</button></div>`;
+    : `<div class="field-label">Aktuální cena za kus (${nativeCur})</div>
+       <div class="row"><input id="pd-currentprice" type="number" step="0.0001" value="${pos.currentPrice ?? ''}" placeholder="zadej ručně, později auto"><button class="btn-sm" style="background:#334155" onclick="updateCurrentPrice('${pos.id}')">Uložit</button></div>
+       ${nativeCur!=="CZK" ? `<div class="pos-meta" style="margin-top:6px">Aktuální kurz ${nativeCur}/CZK: ${fmtNum(rateFor(nativeCur),3)} ${S.liveRates[nativeCur]?(' · ČNB k '+S.liveRates[nativeCur].date):' (záložní, ruční)'} <button class="btn-sm" style="background:#334155;padding:2px 8px;margin-left:6px" onclick="refreshLiveRate('${nativeCur}')">🔄</button></div>` : ''}`;
 
   const txFormFields = isPenzijni
     ? `<div class="field-label">Datum</div><input id="tx-date" type="date" value="${localISODate(new Date())}">
        <div class="field-label">Částka (Kč) — kladná = vklad, záporná = výběr</div><input id="tx-amount" type="number" step="0.01" placeholder="např. 2000 nebo -1000">
        <div class="field-label">Poznámka (nepovinné)</div><input id="tx-note">`
-    : `<div class="field-label">Datum</div><input id="tx-date" type="date" value="${localISODate(new Date())}">
+    : `<div class="field-label">Datum</div><input id="tx-date" type="date" value="${localISODate(new Date())}" onchange="fetchTxFxRate('${pos.id}')">
        <div class="row">
          <div style="flex:1"><div class="field-label">Typ</div><select id="tx-kind"><option value="buy">Nákup</option><option value="sell">Prodej</option></select></div>
        </div>
        <div class="field-label">Počet kusů</div><input id="tx-qty" type="number" step="0.0001" placeholder="např. 10">
-       <div class="field-label">Cena za kus (${pos.currency})</div><input id="tx-price" type="number" step="0.0001" placeholder="např. 1250">
+       <div class="field-label">Cena za kus (${nativeCur})</div><input id="tx-price" type="number" step="0.0001" placeholder="např. 1250">
+       <div class="field-label">Poplatek (nepovinné, ${nativeCur})</div><input id="tx-fee" type="number" step="0.01" placeholder="0">
+       ${nativeCur!=="CZK" ? `<div class="field-label">Kurz CZK/${nativeCur} k datu transakce</div>
+         <input id="tx-fxrate" type="number" step="0.0001" placeholder="dohledá se automaticky z ČNB">
+         <div id="tx-fxrate-status" class="card-sub" style="margin-top:2px"></div>` : ""}
        <div class="field-label">Poznámka (nepovinné)</div><input id="tx-note">`;
   const txForm = addTxFormOpen ? `${txFormFields}
        <button class="btn" onclick="addTx('${pos.id}')" style="width:100%;margin-top:10px;background:#166534">Přidat</button>` : "";
@@ -363,15 +419,16 @@ function renderPositionDetail(id){
     <div class="row">
       <div>
         <div class="card-title">${pos.name}</div>
-        <div class="pos-meta"><span class="type-badge type-${pos.type}">${TYPE_LABEL[pos.type]}</span> ${pos.ticker?(" · "+pos.ticker):""} ${!isPenzijni?(" · "+pos.currency):""}</div>
+        <div class="pos-meta"><span class="type-badge type-${pos.type}">${TYPE_LABEL[pos.type]}</span> ${pos.ticker?(" · "+pos.ticker):""} ${!isPenzijni?(" · "+nativeCur):""}</div>
       </div>
       <button class="btn-sm" style="background:#7f1d1d" onclick="deletePosition('${pos.id}')">🗑</button>
     </div>
     <div class="grid2" style="margin-top:12px">
-      <div class="stat-box"><div class="stat-num">${fmtCZK(c.currentValue)}</div><div class="stat-lbl">AKTUÁLNÍ HODNOTA</div></div>
-      <div class="stat-box"><div class="stat-num ${pClass}">${c.pnl>=0?'+':''}${fmtCZK(c.pnl)}</div><div class="stat-lbl">ZISK/ZTRÁTA (${c.pnlPct.toFixed(1)}%)</div></div>
+      <div class="stat-box"><div class="stat-num">${fmtMoney(dispCurrentValue, dispCur)}</div><div class="stat-lbl">AKTUÁLNÍ HODNOTA</div></div>
+      <div class="stat-box"><div class="stat-num ${pClass}">${dispPnl>=0?'+':''}${fmtMoney(dispPnl, dispCur)}</div><div class="stat-lbl">ZISK/ZTRÁTA (${dispPnlPct.toFixed(1)}%)</div></div>
     </div>
-    ${!isPenzijni ? `<div class="pos-meta" style="margin-top:8px">Držíš: ${fmtNum(c.qty,4)} ks · Vloženo: ${fmtCZK(c.invested)}</div>` : `<div class="pos-meta" style="margin-top:8px">Vloženo celkem: ${fmtCZK(c.invested)}</div>`}
+    ${!isPenzijni ? `<div class="pos-meta" style="margin-top:8px">Držíš: ${fmtNum(c.qty,4)} ks · Vloženo: ${fmtMoney(dispInvested, dispCur)}</div>` : `<div class="pos-meta" style="margin-top:8px">Vloženo celkem: ${fmtCZK(c.invested)}</div>`}
+    ${currencyToggle}
   </div>
 
   <div class="card">
@@ -380,7 +437,7 @@ function renderPositionDetail(id){
   </div>
 
   <div class="card">
-    <div class="card-title" style="cursor:pointer" onclick="toggleAddTxForm()">${addTxFormOpen?'➖':'➕'} ${isPenzijni ? 'Přidat vklad/výběr' : 'Přidat transakci'}</div>
+    <div class="card-title" style="cursor:pointer" onclick="toggleAddTxForm('${pos.id}')">${addTxFormOpen?'➖':'➕'} ${isPenzijni ? 'Přidat vklad/výběr' : 'Přidat transakci'}</div>
     ${txForm}
   </div>
 
@@ -389,7 +446,14 @@ function renderPositionDetail(id){
     ${txRows}
   </div>`;
 }
-function toggleAddTxForm(){ addTxFormOpen = !addTxFormOpen; render(); }
+function toggleAddTxForm(posId){
+  addTxFormOpen = !addTxFormOpen;
+  render();
+  if(addTxFormOpen && posId){
+    const pos = P.positions.find(p=>p.id===posId);
+    if(pos && pos.currency !== "CZK") fetchTxFxRate(posId);
+  }
+}
 function localISODate(dt){
   return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")}`;
 }
@@ -405,6 +469,53 @@ function updateCurrentValue(id){
   pos.currentValue = isNaN(v) ? null : v;
   savePortfolio(); render();
 }
+
+// ── ČNB DEVIZOVÉ KURZY (přes Worker — ČNB API nemá CORS pro přímé volání z prohlížeče) ──
+async function fetchTxFxRate(posId){
+  const pos = P.positions.find(p=>p.id===posId); if(!pos || pos.currency === "CZK") return;
+  if(!S.workerUrl) return;
+  const dateEl = document.getElementById("tx-date");
+  const fxEl = document.getElementById("tx-fxrate");
+  const statusEl = document.getElementById("tx-fxrate-status");
+  if(!dateEl || !fxEl) return;
+  const date = dateEl.value;
+  if(!date) return;
+  if(statusEl) statusEl.textContent = "⏳ zjišťuji kurz z ČNB...";
+  try{
+    const res = await fetch(S.workerUrl, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ action:"fx_rate", currency: pos.currency, date })
+    });
+    const data = await res.json();
+    if(data.rate){
+      fxEl.value = data.rate.toFixed(4);
+      statusEl && (statusEl.textContent = data.date===date
+        ? `✅ ČNB kurz k ${data.date}`
+        : `✅ ČNB kurz k ${data.date} (nejbližší předchozí obchodní den)`);
+    } else {
+      statusEl && (statusEl.textContent = "⚠️ Kurz se nepodařilo dohledat, zadej ručně.");
+    }
+  }catch(e){
+    statusEl && (statusEl.textContent = "⚠️ Offline nebo chyba Workeru — zadej kurz ručně.");
+  }
+}
+async function refreshLiveRate(cur){
+  if(cur==="CZK" || !S.workerUrl) return;
+  try{
+    const today = localISODate(new Date());
+    const res = await fetch(S.workerUrl, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ action:"fx_rate", currency: cur, date: today })
+    });
+    const data = await res.json();
+    if(data.rate){
+      S.liveRates[cur] = { rate: data.rate, date: data.date };
+      saveSettings();
+      render();
+    }
+  }catch(e){ /* tiše ignorovat, použije se záložní kurz */ }
+}
+
 function addTx(id){
   const pos = P.positions.find(p=>p.id===id); if(!pos) return;
   const date = document.getElementById("tx-date").value || localISODate(new Date());
@@ -417,9 +528,17 @@ function addTx(id){
     const kind = document.getElementById("tx-kind").value;
     let qty = parseFloat(document.getElementById("tx-qty").value);
     const price = parseFloat(document.getElementById("tx-price").value);
+    const feeEl = document.getElementById("tx-fee");
+    const fee = feeEl ? (parseFloat(feeEl.value) || 0) : 0;
     if(isNaN(qty) || qty<=0 || isNaN(price) || price<=0){ alert("Zadej platný počet kusů a cenu."); return; }
     if(kind==="sell") qty = -qty;
-    pos.transactions.push({ id: uid(), date, qty, price, note });
+    let fxRate = null;
+    if(pos.currency !== "CZK"){
+      const fxEl = document.getElementById("tx-fxrate");
+      const v = fxEl ? parseFloat(fxEl.value) : NaN;
+      if(!isNaN(v) && v>0) fxRate = v;
+    }
+    pos.transactions.push({ id: uid(), date, qty, price, fee, fxRate, note });
   }
   savePortfolio(); render();
 }
@@ -483,13 +602,20 @@ function renderAdmin(){
     <div id="sync-info" style="font-size:11px;color:#64748b;margin-top:8px"></div>
   </div>
   <div class="card">
-    <div class="card-title">Kurzy měn → CZK</div>
-    <div class="card-sub">Zatím ruční zadávání. Později napojíme na ČNB API.</div>
-    <div class="field-label">1 USD = ? CZK</div>
+    <div class="card-title">Devizové kurzy</div>
+    <div class="card-sub">Živé kurzy se stahují z ČNB (zdarma, bez klíče). Ruční hodnoty níže se použijí jen jako záloha, kdyby se stažení nepovedlo (offline apod.).</div>
+    <div class="row" style="margin-top:8px">
+      <div class="pos-meta">USD: <b>${fmtNum(rateFor("USD"),3)}</b> Kč ${S.liveRates.USD ? `<span style="color:#22c55e">· ČNB ${S.liveRates.USD.date}</span>` : `<span style="color:#f59e0b">· záložní ruční</span>`}</div>
+    </div>
+    <div class="row">
+      <div class="pos-meta">EUR: <b>${fmtNum(rateFor("EUR"),3)}</b> Kč ${S.liveRates.EUR ? `<span style="color:#22c55e">· ČNB ${S.liveRates.EUR.date}</span>` : `<span style="color:#f59e0b">· záložní ruční</span>`}</div>
+    </div>
+    <button class="btn" onclick="refreshLiveRate('USD');refreshLiveRate('EUR')" style="width:100%;margin-top:10px;background:#1e40af">🔄 Aktualizovat kurzy z ČNB</button>
+    <div class="field-label" style="margin-top:12px">Záložní kurz — 1 USD = ? CZK</div>
     <input id="s-usd" type="number" step="0.01" value="${S.rates.USD}">
-    <div class="field-label">1 EUR = ? CZK</div>
+    <div class="field-label">Záložní kurz — 1 EUR = ? CZK</div>
     <input id="s-eur" type="number" step="0.01" value="${S.rates.EUR}">
-    <button class="btn" onclick="saveRates()" style="width:100%;margin-top:10px;background:#166534">💾 Uložit kurzy</button>
+    <button class="btn" onclick="saveRates()" style="width:100%;margin-top:10px;background:#166534">💾 Uložit záložní kurzy</button>
   </div>`;
 }
 function saveAdminForm(){
