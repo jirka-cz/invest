@@ -98,6 +98,8 @@ let openPositionId = null; // když je nastaveno, portfolio tab zobrazuje detail
 let addPositionFormOpen = false; // sbalený/rozbalený formulář "Přidat pozici"
 let addTxFormOpen = false; // sbalený/rozbalený formulář "Přidat transakci" v detailu pozice
 let posShowCZK = false; // v detailu pozice: false = nativní měna (obchodovací), true = přepočet na CZK
+let editingTxId = null; // pokud je nastaveno, formulář "Přidat transakci" edituje existující transakci místo přidání nové
+let editPosMetaOpen = false; // sbalený/rozbalený formulář úpravy názvu/tickeru/ISIN u existující pozice
 let autoSyncTimer = null;
 let syncInFlight = false;
 
@@ -277,7 +279,7 @@ function renderPortfolio(){
           <div class="row">
             <div>
               <div class="pos-name">${pos.name}</div>
-              <div class="pos-meta">${pos.ticker ? pos.ticker+" · " : ""}${pos.currency}</div>
+              <div class="pos-meta">${pos.ticker ? pos.ticker+" · " : ""}${pos.isin ? pos.isin+" · " : ""}${pos.currency}</div>
             </div>
             <div>
               <div class="pos-value">${fmtCZK(c.currentValue)}</div>
@@ -302,6 +304,8 @@ function renderPortfolio(){
     <input id="np-name" placeholder="např. CEZ, VWCE, Bitcoin, Penzijko ČS">
     <div class="field-label">Ticker (nepovinné)</div>
     <input id="np-ticker" placeholder="např. CEZ.PR, VWCE.DE, BTC">
+    <div class="field-label">ISIN (nepovinné)</div>
+    <input id="np-isin" placeholder="např. US5949181045" style="text-transform:uppercase">
     <div id="np-currency-wrap">
       <div class="field-label">Měna</div>
       <select id="np-currency">
@@ -328,8 +332,9 @@ function addPosition(){
   const name = document.getElementById("np-name").value.trim();
   if(!name){ alert("Zadej název pozice."); return; }
   const ticker = document.getElementById("np-ticker").value.trim();
+  const isin = document.getElementById("np-isin").value.trim().toUpperCase();
   const currency = type==="penzijni" ? "CZK" : document.getElementById("np-currency").value;
-  const pos = { id: uid(), type, name, ticker, currency, currentPrice: null, currentValue: null, transactions: [] };
+  const pos = { id: uid(), type, name, ticker, isin, currency, currentPrice: null, currentValue: null, transactions: [] };
   P.positions.push(pos);
   savePortfolio();
   addPositionFormOpen = false;
@@ -342,7 +347,7 @@ function deletePosition(id){
   openPositionId = null;
   render();
 }
-function openPosition(id){ openPositionId = id; addTxFormOpen = false; posShowCZK = false; render(); }
+function openPosition(id){ openPositionId = id; addTxFormOpen = false; posShowCZK = false; editingTxId = null; editPosMetaOpen = false; render(); }
 function closePosition(){ openPositionId = null; render(); }
 function setPosCurrency(showCZK){ posShowCZK = showCZK; render(); }
 
@@ -367,6 +372,8 @@ function renderPositionDetail(id){
       <button class="btn-sm" style="flex:1;background:${posShowCZK?'#7c3aed':'#334155'}" onclick="setPosCurrency(true)">CZK (přepočet)</button>
     </div>` : "";
 
+  const editingTx = editingTxId ? (pos.transactions||[]).find(t=>t.id===editingTxId) : null;
+
   const txRows = [...(pos.transactions||[])].sort((a,b)=> b.date.localeCompare(a.date)).map(t=>{
     let label;
     if(isPenzijni){
@@ -384,7 +391,10 @@ function renderPositionDetail(id){
     }
     return `<div class="tx-row">
       <span>${t.date} — ${label}${t.note?` <span style="color:#475569">(${t.note})</span>`:""}</span>
-      <button class="tx-del" onclick="deleteTx('${pos.id}','${t.id}')">✕</button>
+      <span style="white-space:nowrap">
+        <button class="tx-del" style="color:#94a3b8" onclick="editTx('${pos.id}','${t.id}')">✏️</button>
+        <button class="tx-del" onclick="deleteTx('${pos.id}','${t.id}')">✕</button>
+      </span>
     </div>`;
   }).join("") || `<div class="empty-hint">Zatím žádné transakce.</div>`;
 
@@ -396,22 +406,28 @@ function renderPositionDetail(id){
        ${nativeCur!=="CZK" ? `<div class="pos-meta" style="margin-top:6px">Aktuální kurz ${nativeCur}/CZK: ${fmtNum(rateFor(nativeCur),3)} ${S.liveRates[nativeCur]?(' · ČNB k '+S.liveRates[nativeCur].date):' (záložní, ruční)'} <button class="btn-sm" style="background:#334155;padding:2px 8px;margin-left:6px" onclick="refreshLiveRate('${nativeCur}')">🔄</button></div>` : ''}`;
 
   const txFormFields = isPenzijni
-    ? `<div class="field-label">Datum</div><input id="tx-date" type="date" value="${localISODate(new Date())}">
-       <div class="field-label">Částka (Kč) — kladná = vklad, záporná = výběr</div><input id="tx-amount" type="number" step="0.01" placeholder="např. 2000 nebo -1000">
-       <div class="field-label">Poznámka (nepovinné)</div><input id="tx-note">`
-    : `<div class="field-label">Datum</div><input id="tx-date" type="date" value="${localISODate(new Date())}" onchange="fetchTxFxRate('${pos.id}')">
+    ? `<div class="field-label">Datum</div><input id="tx-date" type="date" value="${editingTx?.date || localISODate(new Date())}">
+       <div class="field-label">Částka (Kč) — kladná = vklad, záporná = výběr</div><input id="tx-amount" type="number" step="0.01" value="${editingTx ? editingTx.qty : ''}" placeholder="např. 2000 nebo -1000">
+       <div class="field-label">Poznámka (nepovinné)</div><input id="tx-note" value="${editingTx?.note || ''}">`
+    : `<div class="field-label">Datum</div><input id="tx-date" type="date" value="${editingTx?.date || localISODate(new Date())}" onchange="fetchTxFxRate('${pos.id}')">
        <div class="row">
-         <div style="flex:1"><div class="field-label">Typ</div><select id="tx-kind"><option value="buy">Nákup</option><option value="sell">Prodej</option></select></div>
+         <div style="flex:1"><div class="field-label">Typ</div><select id="tx-kind">
+           <option value="buy" ${!editingTx || editingTx.qty>=0 ? 'selected':''}>Nákup</option>
+           <option value="sell" ${editingTx && editingTx.qty<0 ? 'selected':''}>Prodej</option>
+         </select></div>
        </div>
-       <div class="field-label">Počet kusů</div><input id="tx-qty" type="number" step="0.0001" placeholder="např. 10">
-       <div class="field-label">Cena za kus (${nativeCur})</div><input id="tx-price" type="number" step="0.0001" placeholder="např. 1250">
-       <div class="field-label">Poplatek (nepovinné, ${nativeCur})</div><input id="tx-fee" type="number" step="0.01" placeholder="0">
+       <div class="field-label">Počet kusů</div><input id="tx-qty" type="number" step="0.0001" value="${editingTx ? Math.abs(editingTx.qty) : ''}" placeholder="např. 10">
+       <div class="field-label">Cena za kus (${nativeCur})</div><input id="tx-price" type="number" step="0.0001" value="${editingTx?.price ?? ''}" placeholder="např. 1250">
+       <div class="field-label">Poplatek (nepovinné, ${nativeCur})</div><input id="tx-fee" type="number" step="0.01" value="${editingTx?.fee || ''}" placeholder="0">
        ${nativeCur!=="CZK" ? `<div class="field-label">Kurz CZK/${nativeCur} k datu transakce</div>
-         <input id="tx-fxrate" type="number" step="0.0001" placeholder="dohledá se automaticky z ČNB">
+         <input id="tx-fxrate" type="number" step="0.0001" value="${editingTx?.fxRate ?? ''}" placeholder="dohledá se automaticky z ČNB">
          <div id="tx-fxrate-status" class="card-sub" style="margin-top:2px"></div>` : ""}
-       <div class="field-label">Poznámka (nepovinné)</div><input id="tx-note">`;
+       <div class="field-label">Poznámka (nepovinné)</div><input id="tx-note" value="${editingTx?.note || ''}">`;
   const txForm = addTxFormOpen ? `${txFormFields}
-       <button class="btn" onclick="addTx('${pos.id}')" style="width:100%;margin-top:10px;background:#166534">Přidat</button>` : "";
+       <div class="row" style="margin-top:10px;gap:8px">
+         <button class="btn" onclick="addOrUpdateTx('${pos.id}')" style="flex:1;background:#166534">${editingTx ? 'Uložit změny' : 'Přidat'}</button>
+         ${editingTx ? `<button class="btn" onclick="cancelEditTx()" style="background:#334155">Zrušit</button>` : ''}
+       </div>` : "";
 
   return `
   <div class="card">
@@ -419,7 +435,7 @@ function renderPositionDetail(id){
     <div class="row">
       <div>
         <div class="card-title">${pos.name}</div>
-        <div class="pos-meta"><span class="type-badge type-${pos.type}">${TYPE_LABEL[pos.type]}</span> ${pos.ticker?(" · "+pos.ticker):""} ${!isPenzijni?(" · "+nativeCur):""}</div>
+        <div class="pos-meta"><span class="type-badge type-${pos.type}">${TYPE_LABEL[pos.type]}</span> ${pos.ticker?(" · "+pos.ticker):""} ${pos.isin?(" · "+pos.isin):""} ${!isPenzijni?(" · "+nativeCur):""}</div>
       </div>
       <button class="btn-sm" style="background:#7f1d1d" onclick="deletePosition('${pos.id}')">🗑</button>
     </div>
@@ -429,6 +445,15 @@ function renderPositionDetail(id){
     </div>
     ${!isPenzijni ? `<div class="pos-meta" style="margin-top:8px">Držíš: ${fmtNum(c.qty,4)} ks · Vloženo: ${fmtMoney(dispInvested, dispCur)}</div>` : `<div class="pos-meta" style="margin-top:8px">Vloženo celkem: ${fmtCZK(c.invested)}</div>`}
     ${currencyToggle}
+  </div>
+
+  <div class="card">
+    <div class="card-title" style="cursor:pointer" onclick="toggleEditPosMeta()">${editPosMetaOpen?'➖':'✏️'} Upravit název / ticker / ISIN</div>
+    ${editPosMetaOpen ? `
+    <div class="field-label">Název</div><input id="pd-name" value="${pos.name}">
+    <div class="field-label">Ticker</div><input id="pd-ticker" value="${pos.ticker||''}">
+    <div class="field-label">ISIN</div><input id="pd-isin" value="${pos.isin||''}" style="text-transform:uppercase">
+    <button class="btn" onclick="updatePosMeta('${pos.id}')" style="width:100%;margin-top:10px;background:#166534">Uložit</button>` : ''}
   </div>
 
   <div class="card">
@@ -447,6 +472,7 @@ function renderPositionDetail(id){
   </div>`;
 }
 function toggleAddTxForm(posId){
+  editingTxId = null;
   addTxFormOpen = !addTxFormOpen;
   render();
   if(addTxFormOpen && posId){
@@ -456,6 +482,17 @@ function toggleAddTxForm(posId){
 }
 function localISODate(dt){
   return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")}`;
+}
+function toggleEditPosMeta(){ editPosMetaOpen = !editPosMetaOpen; render(); }
+function updatePosMeta(id){
+  const pos = P.positions.find(p=>p.id===id); if(!pos) return;
+  const name = document.getElementById("pd-name").value.trim();
+  if(!name){ alert("Název nemůže být prázdný."); return; }
+  pos.name = name;
+  pos.ticker = document.getElementById("pd-ticker").value.trim();
+  pos.isin = document.getElementById("pd-isin").value.trim().toUpperCase();
+  editPosMetaOpen = false;
+  savePortfolio(); render();
 }
 function updateCurrentPrice(id){
   const pos = P.positions.find(p=>p.id===id); if(!pos) return;
@@ -516,14 +553,15 @@ async function refreshLiveRate(cur){
   }catch(e){ /* tiše ignorovat, použije se záložní kurz */ }
 }
 
-function addTx(id){
+function addOrUpdateTx(id){
   const pos = P.positions.find(p=>p.id===id); if(!pos) return;
   const date = document.getElementById("tx-date").value || localISODate(new Date());
   const note = document.getElementById("tx-note").value.trim();
+  let txData;
   if(pos.type === "penzijni"){
     const amount = parseFloat(document.getElementById("tx-amount").value);
     if(isNaN(amount) || amount===0){ alert("Zadej platnou částku."); return; }
-    pos.transactions.push({ id: uid(), date, qty: amount, price: 1, note });
+    txData = { date, qty: amount, price: 1, note };
   } else {
     const kind = document.getElementById("tx-kind").value;
     let qty = parseFloat(document.getElementById("tx-qty").value);
@@ -538,13 +576,32 @@ function addTx(id){
       const v = fxEl ? parseFloat(fxEl.value) : NaN;
       if(!isNaN(v) && v>0) fxRate = v;
     }
-    pos.transactions.push({ id: uid(), date, qty, price, fee, fxRate, note });
+    txData = { date, qty, price, fee, fxRate, note };
+  }
+  if(editingTxId){
+    const idx = pos.transactions.findIndex(t=>t.id===editingTxId);
+    if(idx>=0) pos.transactions[idx] = { ...pos.transactions[idx], ...txData };
+    editingTxId = null;
+  } else {
+    pos.transactions.push({ id: uid(), ...txData });
   }
   savePortfolio(); render();
 }
+function editTx(posId, txId){
+  editingTxId = txId;
+  addTxFormOpen = true;
+  render();
+}
+function cancelEditTx(){
+  editingTxId = null;
+  addTxFormOpen = false;
+  render();
+}
 function deleteTx(posId, txId){
+  if(!confirm("Opravdu smazat tuto transakci?")) return;
   const pos = P.positions.find(p=>p.id===posId); if(!pos) return;
   pos.transactions = pos.transactions.filter(t=>t.id!==txId);
+  if(editingTxId===txId) editingTxId = null;
   savePortfolio(); render();
 }
 
