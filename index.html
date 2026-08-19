@@ -284,28 +284,83 @@ async function reconstructHistory(){
   const statusEl2 = document.getElementById("history-rebuild-status");
   if(statusEl2) statusEl2.textContent = `✅ Historie sestavena od ${firstDate} (${newHistory.length} dní) · ${new Date().toLocaleTimeString("cs-CZ",{hour:'2-digit',minute:'2-digit'})}`;
 }
-function buildHistoryChartHTML(){
-  const hist = [...(P.history||[])].sort((a,b)=>a.date.localeCompare(b.date));
-  if(hist.length < 2){
-    return `<div class="empty-hint">Zatím ${hist.length===0?'nemáme':'máme jen'} ${hist.length} datový bod. Klikni na "Sestavit historii ze zpětných dat" níže, nebo appku prostě používej dál — bod za den se ukládá automaticky.</div>`;
+let chartRange = 'max'; // vybrané období grafu: 1m/6m/ytd/1y/5y/10y/max
+function setChartRange(r){ chartRange = r; render(); }
+function filterHistoryByRange(hist){
+  if(chartRange==='max' || hist.length===0) return hist;
+  const now = new Date();
+  let cutoff;
+  if(chartRange==='1m'){ cutoff=new Date(now); cutoff.setMonth(cutoff.getMonth()-1); }
+  else if(chartRange==='6m'){ cutoff=new Date(now); cutoff.setMonth(cutoff.getMonth()-6); }
+  else if(chartRange==='ytd'){ cutoff=new Date(now.getFullYear(),0,1); }
+  else if(chartRange==='1y'){ cutoff=new Date(now); cutoff.setFullYear(cutoff.getFullYear()-1); }
+  else if(chartRange==='5y'){ cutoff=new Date(now); cutoff.setFullYear(cutoff.getFullYear()-5); }
+  else if(chartRange==='10y'){ cutoff=new Date(now); cutoff.setFullYear(cutoff.getFullYear()-10); }
+  else return hist;
+  const cutoffStr = localISODate(cutoff);
+  return hist.filter(h=>h.date>=cutoffStr);
+}
+// "Hezká" čísla pro osu Y (jako u běžných investičních appek — kulaté kroky, ne min/max náhodně)
+function niceNum(range, round){
+  if(range<=0) return 1;
+  const exponent = Math.floor(Math.log10(range));
+  const fraction = range / Math.pow(10, exponent);
+  let niceFraction;
+  if(round){
+    if(fraction<1.5) niceFraction=1;
+    else if(fraction<3) niceFraction=2;
+    else if(fraction<7) niceFraction=5;
+    else niceFraction=10;
+  } else {
+    if(fraction<=1) niceFraction=1;
+    else if(fraction<=2) niceFraction=2;
+    else if(fraction<=5) niceFraction=5;
+    else niceFraction=10;
   }
-  const W=600,H=190,padL=48,padR=10,padT=10,padB=24;
+  return niceFraction * Math.pow(10, exponent);
+}
+function niceTicks(min, max, maxTicks){
+  if(min===max){ min-=1; max+=1; }
+  const range = niceNum(max-min, false);
+  const step = niceNum(range/(maxTicks-1), true);
+  const niceMin = Math.floor(min/step)*step;
+  const niceMax = Math.ceil(max/step)*step;
+  const ticks = [];
+  for(let v=niceMin; v<=niceMax+1e-9; v+=step) ticks.push(Math.round(v));
+  return { ticks, niceMin, niceMax };
+}
+function buildHistoryChartHTML(){
+  const fullHist = [...(P.history||[])].sort((a,b)=>a.date.localeCompare(b.date));
+  const hist = filterHistoryByRange(fullHist);
+  const rangeBtns = [['1m','1M'],['6m','6M'],['ytd','YTD'],['1y','1R'],['5y','5R'],['10y','10R'],['max','Max']]
+    .map(([r,label])=> `<button class="btn-sm" style="flex:none;background:${chartRange===r?'#7c3aed':'#334155'}" onclick="setChartRange('${r}')">${label}</button>`)
+    .join("");
+  const rangeSelector = `<div style="display:flex;gap:6px;overflow-x:auto;margin-top:10px;padding-bottom:2px">${rangeBtns}</div>`;
+
+  if(fullHist.length < 2){
+    return `<div class="empty-hint">Zatím ${fullHist.length===0?'nemáme':'máme jen'} ${fullHist.length} datový bod. Klikni na "Sestavit historii ze zpětných dat" níže, nebo appku prostě používej dál — bod za den se ukládá automaticky.</div>`;
+  }
+  if(hist.length < 2){
+    return `<div class="empty-hint">V tomto období nejsou žádná data. Zkus širší rozsah.</div>${rangeSelector}`;
+  }
+  const W=600,H=190,padL=52,padR=10,padT=10,padB=24;
   const plotW=W-padL-padR, plotH=H-padT-padB;
   const dates = hist.map(h=> new Date(h.date+"T00:00:00Z").getTime());
   const minD=dates[0], maxD=dates[dates.length-1];
-  const vals = hist.map(h=>h.currentValue).concat(hist.map(h=>h.invested));
-  let minV = Math.min(...vals), maxV = Math.max(...vals);
-  if(minV===maxV){ minV -= 1; maxV += 1; }
-  const pad = (maxV-minV)*0.08;
-  minV -= pad; maxV += pad;
+  const rawVals = hist.map(h=>h.currentValue).concat(hist.map(h=>h.invested));
+  const { ticks, niceMin, niceMax } = niceTicks(Math.min(...rawVals), Math.max(...rawVals), 4);
   const xFor = (t) => padL + (maxD===minD ? plotW/2 : (t-minD)/(maxD-minD)*plotW);
-  const yFor = (v) => padT + plotH - ((v-minV)/(maxV-minV))*plotH;
+  const yFor = (v) => padT + plotH - ((v-niceMin)/(niceMax-niceMin))*plotH;
   const linePts = hist.map((h,i)=> `${xFor(dates[i]).toFixed(1)},${yFor(h.currentValue).toFixed(1)}`).join(" ");
   const investedPts = hist.map((h,i)=> `${xFor(dates[i]).toFixed(1)},${yFor(h.invested).toFixed(1)}`).join(" ");
   const areaPts = `${xFor(dates[0]).toFixed(1)},${(padT+plotH).toFixed(1)} ${linePts} ${xFor(dates[dates.length-1]).toFixed(1)},${(padT+plotH).toFixed(1)}`;
   const dataPts = hist.map((h,i)=>({ x:+xFor(dates[i]).toFixed(1), y:+yFor(h.currentValue).toFixed(1), date:h.date, v:h.currentValue, inv:h.invested }));
   const dataJson = JSON.stringify(dataPts);
-  const yTop = fmtCZK(maxV), yBottom = fmtCZK(minV);
+  const gridLines = ticks.map(v=>{
+    const y = yFor(v);
+    return `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W-padR}" y2="${y.toFixed(1)}" stroke="#1e293b" stroke-width="1"></line>
+      <text x="2" y="${(y+3).toFixed(1)}" fill="#475569" font-size="9">${fmtCZK(v)}</text>`;
+  }).join("");
 
   return `
   <div style="position:relative">
@@ -318,8 +373,7 @@ function buildHistoryChartHTML(){
           <stop offset="100%" stop-color="#7c3aed" stop-opacity="0"/>
         </linearGradient>
       </defs>
-      <text x="2" y="${padT+8}" fill="#475569" font-size="9">${yTop}</text>
-      <text x="2" y="${padT+plotH}" fill="#475569" font-size="9">${yBottom}</text>
+      ${gridLines}
       <polygon points="${areaPts}" fill="url(#chartFill)" stroke="none"></polygon>
       <polyline points="${investedPts}" fill="none" stroke="#475569" stroke-width="1.5" stroke-dasharray="4,3"></polyline>
       <polyline points="${linePts}" fill="none" stroke="#7c3aed" stroke-width="2"></polyline>
@@ -328,6 +382,7 @@ function buildHistoryChartHTML(){
     </svg>
     <div class="chart-tooltip" style="display:none;position:absolute;top:4px;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:6px 9px;font-size:11px;pointer-events:none;white-space:nowrap;z-index:5"></div>
   </div>
+  ${rangeSelector}
   <div class="row" style="margin-top:6px;font-size:11px;color:#64748b">
     <span><span style="display:inline-block;width:10px;height:2px;background:#7c3aed;vertical-align:middle;margin-right:4px"></span>Aktuální hodnota</span>
     <span><span style="display:inline-block;width:10px;height:2px;background:#475569;vertical-align:middle;margin-right:4px"></span>Vloženo</span>
