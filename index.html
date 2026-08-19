@@ -86,8 +86,9 @@ const DEFAULT_S = {
 let S = JSON.parse(localStorage.getItem("inv_s") || "null") || {...DEFAULT_S};
 S = {...DEFAULT_S, ...S, rates:{...DEFAULT_S.rates, ...(S.rates||{})}, liveRates:{...(S.liveRates||{})}};
 
-const DEFAULT_P = { positions: [] };
+const DEFAULT_P = { positions: [], history: [] }; // history: [{date, invested, currentValue}] — denní snímky pro graf
 let P = JSON.parse(localStorage.getItem("inv_p") || "null") || {...DEFAULT_P};
+if(!Array.isArray(P.history)) P.history = [];
 
 // META sleduje, KDY se naposledy změnila lokální data (ne obsah samotný) —
 // slouží k rozhodnutí "kdo je novější" mezi tímto zařízením a cloudem.
@@ -99,6 +100,7 @@ let openPositionId = null; // když je nastaveno, portfolio tab zobrazuje detail
 let addPositionFormOpen = false; // sbalený/rozbalený formulář "Přidat pozici"
 let addTxFormOpen = false; // sbalený/rozbalený formulář "Přidat transakci" v detailu pozice
 let posShowCZK = false; // v detailu pozice: false = nativní měna (obchodovací), true = přepočet na CZK
+let portfolioShowCZK = false; // v seznamu pozic (Portfolio tab): false = originální měna každé pozice, true = vše přepočtené na CZK
 let editingTxId = null; // pokud je nastaveno, formulář "Přidat transakci" edituje existující transakci místo přidání nové
 let editPosMetaOpen = false; // sbalený/rozbalený formulář úpravy názvu/tickeru/ISIN u existující pozice
 let autoSyncTimer = null;
@@ -179,6 +181,199 @@ function portfolioTotals(){
   return { invested, currentValue, pnl: currentValue-invested, pnlPct: invested ? (currentValue-invested)/Math.abs(invested)*100 : 0, byType };
 }
 
+// ── HISTORIE HODNOTY PORTFOLIA (pro graf) ───────────────────────────────
+// Appka si při každém otevření uloží jeden bod za den (invested + currentValue),
+// pokud historii ještě NEBYLA sestavena zpětně tlačítkem "Sestavit historii ze
+// zpětných dat" — to spočítá "vloženo" přesně z dat transakcí a "aktuální hodnotu"
+// z historických cen (Twelve Data), takže graf jde vidět rovnou od první transakce.
+function recordDailySnapshot(){
+  if(P.positions.length===0) return; // nemá smysl ukládat prázdné portfolio
+  const today = localISODate(new Date());
+  const t = portfolioTotals();
+  const existing = P.history.find(h=>h.date===today);
+  if(existing){
+    if(Math.round(existing.currentValue)!==Math.round(t.currentValue) || Math.round(existing.invested)!==Math.round(t.invested)){
+      existing.currentValue = t.currentValue; existing.invested = t.invested;
+      savePortfolio();
+    }
+  } else {
+    P.history.push({ date: today, invested: t.invested, currentValue: t.currentValue });
+    if(P.history.length>800) P.history = P.history.slice(-800); // pojistka proti neomezenému růstu
+    savePortfolio();
+  }
+}
+function firstTransactionDate(){
+  let min = null;
+  P.positions.forEach(pos=> (pos.transactions||[]).forEach(t=>{ if(!min || t.date<min) min = t.date; }));
+  return min;
+}
+// Zpětně sestaví celou historii hodnoty portfolia:
+// - "vloženo" = přesný součet transakcí ke každému dni (100% přesné, žádná externí data)
+// - "aktuální hodnota" = držené kusy × historická cena k danému dni (Twelve Data), přepočtená
+//   DNEŠNÍM kurzem napříč celou historií (zjednodušení — nemáme historické kurzy pro každý den,
+//   jen k datům transakcí). U OTC fondů a pozic bez historických cen se použije poslední známá
+//   cena zpětně (konzervativní odhad, ne skutečný historický vývoj).
+async function reconstructHistory(){
+  const firstDate = firstTransactionDate();
+  if(!firstDate){ alert("Nejdřív přidej alespoň jednu transakci."); return; }
+  const statusEl = document.getElementById("history-rebuild-status");
+  const priceable = P.positions.filter(p=> p.type!=="penzijni" && p.type!=="fond" && p.ticker && (p.transactions||[]).length);
+  const priceArrays = {}; // pos.id -> [[date, close], ...] seřazeno vzestupně
+
+  for(let i=0;i<priceable.length;i++){
+    const pos = priceable[i];
+    if(statusEl) statusEl.textContent = `⏳ Stahuji historické ceny: ${pos.name} (${i+1}/${priceable.length})...`;
+    if(!S.workerUrl) break;
+    try{
+      const res = await fetch(S.workerUrl, { method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ action:"price_history", symbol: pos.ticker, start: firstDate }) });
+      const data = await res.json();
+      if(data.prices && data.prices.length){
+        priceArrays[pos.id] = data.prices.map(p=>[p.date, p.close]).sort((a,b)=> a[0]<b[0]?-1:1);
+      }
+    }catch(e){ /* pozice bez historie ceny — použije se fallback níže */ }
+  }
+
+  if(statusEl) statusEl.textContent = `⏳ Sestavuji graf...`;
+
+  // seřazené transakce a stavové ukazatele pro efektivní průchod dní vzestupně
+  const posState = {};
+  P.positions.forEach(pos=>{
+    const txs = [...(pos.transactions||[])].sort((a,b)=> a.date<b.date?-1:1);
+    posState[pos.id] = { txs, txIdx:0, qty:0, investedNative:0, investedCZK:0, priceArr: priceArrays[pos.id]||null, priceIdx:0, lastPrice:null };
+  });
+
+  const startD = new Date(firstDate+"T00:00:00Z");
+  const endD = new Date(localISODate(new Date())+"T00:00:00Z");
+  const newHistory = [];
+  for(let d=new Date(startD); d<=endD; d.setUTCDate(d.getUTCDate()+1)){
+    const dateStr = localISODate(d);
+    let invested = 0, currentValue = 0;
+    P.positions.forEach(pos=>{
+      const st = posState[pos.id];
+      if(pos.type==="penzijni"){
+        while(st.txIdx<st.txs.length && st.txs[st.txIdx].date<=dateStr){ st.investedCZK += st.txs[st.txIdx].qty; st.txIdx++; }
+        invested += st.investedCZK;
+        currentValue += st.investedCZK; // bez historie hodnoty fondu — konzervativně = vklady
+        return;
+      }
+      while(st.txIdx<st.txs.length && st.txs[st.txIdx].date<=dateStr){
+        const t = st.txs[st.txIdx];
+        st.qty += t.qty;
+        st.investedNative += t.qty*t.price + (t.fee||0);
+        const r = t.fxRate || rateFor(pos.currency);
+        st.investedCZK += (t.qty*t.price + (t.fee||0)) * r;
+        st.txIdx++;
+      }
+      invested += st.investedCZK;
+      if(st.qty>0){
+        if(st.priceArr){
+          while(st.priceIdx<st.priceArr.length && st.priceArr[st.priceIdx][0]<=dateStr){ st.lastPrice = st.priceArr[st.priceIdx][1]; st.priceIdx++; }
+        }
+        const price = st.lastPrice!=null ? st.lastPrice : (pos.currentPrice!=null ? pos.currentPrice : 0);
+        const rate = rateFor(pos.currency);
+        currentValue += st.qty * price * rate;
+      }
+    });
+    newHistory.push({ date: dateStr, invested, currentValue });
+  }
+
+  P.history = newHistory;
+  savePortfolio();
+  render();
+  const statusEl2 = document.getElementById("history-rebuild-status");
+  if(statusEl2) statusEl2.textContent = `✅ Historie sestavena od ${firstDate} (${newHistory.length} dní) · ${new Date().toLocaleTimeString("cs-CZ",{hour:'2-digit',minute:'2-digit'})}`;
+}
+function buildHistoryChartHTML(){
+  const hist = [...(P.history||[])].sort((a,b)=>a.date.localeCompare(b.date));
+  if(hist.length < 2){
+    return `<div class="empty-hint">Zatím ${hist.length===0?'nemáme':'máme jen'} ${hist.length} datový bod. Klikni na "Sestavit historii ze zpětných dat" níže, nebo appku prostě používej dál — bod za den se ukládá automaticky.</div>`;
+  }
+  const W=600,H=190,padL=48,padR=10,padT=10,padB=24;
+  const plotW=W-padL-padR, plotH=H-padT-padB;
+  const dates = hist.map(h=> new Date(h.date+"T00:00:00Z").getTime());
+  const minD=dates[0], maxD=dates[dates.length-1];
+  const vals = hist.map(h=>h.currentValue).concat(hist.map(h=>h.invested));
+  let minV = Math.min(...vals), maxV = Math.max(...vals);
+  if(minV===maxV){ minV -= 1; maxV += 1; }
+  const pad = (maxV-minV)*0.08;
+  minV -= pad; maxV += pad;
+  const xFor = (t) => padL + (maxD===minD ? plotW/2 : (t-minD)/(maxD-minD)*plotW);
+  const yFor = (v) => padT + plotH - ((v-minV)/(maxV-minV))*plotH;
+  const linePts = hist.map((h,i)=> `${xFor(dates[i]).toFixed(1)},${yFor(h.currentValue).toFixed(1)}`).join(" ");
+  const investedPts = hist.map((h,i)=> `${xFor(dates[i]).toFixed(1)},${yFor(h.invested).toFixed(1)}`).join(" ");
+  const areaPts = `${xFor(dates[0]).toFixed(1)},${(padT+plotH).toFixed(1)} ${linePts} ${xFor(dates[dates.length-1]).toFixed(1)},${(padT+plotH).toFixed(1)}`;
+  const dataPts = hist.map((h,i)=>({ x:+xFor(dates[i]).toFixed(1), y:+yFor(h.currentValue).toFixed(1), date:h.date, v:h.currentValue, inv:h.invested }));
+  const dataJson = JSON.stringify(dataPts);
+  const yTop = fmtCZK(maxV), yBottom = fmtCZK(minV);
+
+  return `
+  <div style="position:relative">
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;touch-action:pan-y"
+         onmousemove="chartHover(event,this)" ontouchstart="chartHover(event.touches[0],this)" ontouchmove="chartHover(event.touches[0],this)"
+         onmouseleave="chartHoverEnd(this)" ontouchend="chartHoverEnd(this)" data-points='${dataJson}'>
+      <defs>
+        <linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#7c3aed" stop-opacity="0.35"/>
+          <stop offset="100%" stop-color="#7c3aed" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <text x="2" y="${padT+8}" fill="#475569" font-size="9">${yTop}</text>
+      <text x="2" y="${padT+plotH}" fill="#475569" font-size="9">${yBottom}</text>
+      <polygon points="${areaPts}" fill="url(#chartFill)" stroke="none"></polygon>
+      <polyline points="${investedPts}" fill="none" stroke="#475569" stroke-width="1.5" stroke-dasharray="4,3"></polyline>
+      <polyline points="${linePts}" fill="none" stroke="#7c3aed" stroke-width="2"></polyline>
+      <line class="chart-guide" x1="0" y1="${padT}" x2="0" y2="${padT+plotH}" stroke="#334155" stroke-width="1" style="display:none"></line>
+      <circle class="chart-dot" r="4" fill="#a78bfa" stroke="#0a0f1e" stroke-width="2" style="display:none"></circle>
+    </svg>
+    <div class="chart-tooltip" style="display:none;position:absolute;top:4px;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:6px 9px;font-size:11px;pointer-events:none;white-space:nowrap;z-index:5"></div>
+  </div>
+  <div class="row" style="margin-top:6px;font-size:11px;color:#64748b">
+    <span><span style="display:inline-block;width:10px;height:2px;background:#7c3aed;vertical-align:middle;margin-right:4px"></span>Aktuální hodnota</span>
+    <span><span style="display:inline-block;width:10px;height:2px;background:#475569;vertical-align:middle;margin-right:4px"></span>Vloženo</span>
+  </div>`;
+}
+function chartHover(evt, svgEl){
+  if(!evt) return;
+  const pts = JSON.parse(svgEl.getAttribute('data-points'));
+  if(!pts || !pts.length) return;
+  const rect = svgEl.getBoundingClientRect();
+  const vb = svgEl.viewBox.baseVal;
+  const relX = (evt.clientX - rect.left) / rect.width * vb.width;
+  let nearest = pts[0], minDist = Infinity;
+  for(const p of pts){ const d = Math.abs(p.x-relX); if(d<minDist){ minDist=d; nearest=p; } }
+  const dot = svgEl.querySelector('.chart-dot');
+  const guide = svgEl.querySelector('.chart-guide');
+  if(dot){ dot.setAttribute('cx', nearest.x); dot.setAttribute('cy', nearest.y); dot.style.display='block'; }
+  if(guide){ guide.setAttribute('x1', nearest.x); guide.setAttribute('x2', nearest.x); guide.style.display='block'; }
+  const tip = svgEl.parentElement.querySelector('.chart-tooltip');
+  if(tip){
+    const diff = nearest.v - nearest.inv;
+    const diffPct = nearest.inv ? (diff/Math.abs(nearest.inv)*100) : 0;
+    tip.innerHTML = `<b>${nearest.date}</b><br>${fmtCZK(nearest.v)}<br><span style="color:${diff>=0?'#22c55e':'#ef4444'}">${diff>=0?'+':''}${fmtCZK(diff)} (${diffPct.toFixed(1)}%)</span>`;
+    tip.style.display='block';
+    const leftPct = (nearest.x/vb.width*100);
+    tip.style.left = Math.min(Math.max(leftPct,8),68) + '%';
+  }
+}
+function chartHoverEnd(svgEl){
+  const dot = svgEl.querySelector('.chart-dot');
+  const guide = svgEl.querySelector('.chart-guide');
+  if(dot) dot.style.display='none';
+  if(guide) guide.style.display='none';
+  const tip = svgEl.parentElement.querySelector('.chart-tooltip');
+  if(tip) tip.style.display='none';
+}
+function renderHistoryChartCard(){
+  return `<div class="card">
+    <div class="card-title">Vývoj hodnoty v čase</div>
+    ${buildHistoryChartHTML()}
+    <button class="btn" onclick="reconstructHistory()" style="width:100%;margin-top:10px;background:#1e40af">📈 Sestavit historii ze zpětných dat</button>
+    <div id="history-rebuild-status" class="card-sub" style="margin-top:6px"></div>
+    <div class="card-sub" style="margin-top:4px">Přesně dopočítá "vloženo" z dat transakcí a "aktuální hodnotu" z historických cen (Twelve Data). U OTC fondů/pozic bez historických cen se historicky použije poslední známá cena zpětně — je to odhad, ne skutečný dobový vývoj.</div>
+  </div>`;
+}
+
 // ── NAVIGACE ─────────────────────────────────────────────────────────────
 function showTab(tab){
   currentTab = tab;
@@ -202,6 +397,7 @@ function renderPrehled(){
       <div class="empty-hint">Zatím nemáš žádné pozice.<br>Přidej je v záložce Portfolio 💼</div>
     </div>`;
   }
+  recordDailySnapshot();
   const t = portfolioTotals();
   const pnlClass = t.pnl >= 0 ? "pnl-pos" : "pnl-neg";
   const typeEntries = Object.entries(t.byType).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
@@ -257,9 +453,7 @@ function renderPrehled(){
     ${posRows}
   </div>
 
-  <div class="card">
-    <div class="card-sub">📌 Graf vývoje hodnoty v čase a srovnání s benchmarkem (S&amp;P 500) přidáme, jakmile budeme mít historická data z cenového API — zatím appka počítá jen aktuální stav podle ručně/automaticky zadaných cen.</div>
-  </div>`;
+  ${renderHistoryChartCard()}`;
 }
 
 // ── PORTFOLIO — seznam pozic ────────────────────────────────────────────
@@ -275,16 +469,29 @@ function renderPortfolio(){
     order.filter(t=>groups[t]).forEach(type=>{
       const items = groups[type].map(pos=>{
         const c = calcPosition(pos);
-        const pClass = c.pnl>=0 ? "pnl-pos" : "pnl-neg";
+        const isPenzijni = pos.type === "penzijni";
+        const useCZK = portfolioShowCZK || pos.currency === "CZK";
+        const cur = useCZK ? "CZK" : pos.currency;
+        const dispInvested = useCZK ? c.invested : c.investedNative;
+        const dispCurrentValue = useCZK ? c.currentValue : c.currentValueNative;
+        const dispPnl = useCZK ? c.pnl : c.pnlNative;
+        const dispPnlPct = useCZK ? c.pnlPct : c.pnlPctNative;
+        const pClass = dispPnl>=0 ? "pnl-pos" : "pnl-neg";
+        const buyPricePerUnit = (!isPenzijni && c.qty) ? dispInvested/c.qty : null;
+        const nowPricePerUnit = (!isPenzijni && c.qty) ? dispCurrentValue/c.qty : null;
+        const detailLine = !isPenzijni
+          ? `<div class="pos-meta" style="margin-top:2px">${fmtNum(c.qty,4)} ks · nákup ${buyPricePerUnit!=null?fmtMoney(buyPricePerUnit,cur):'–'}/ks · nyní ${nowPricePerUnit!=null?fmtMoney(nowPricePerUnit,cur):'–'}/ks</div>`
+          : "";
         return `<div class="pos-item" onclick="openPosition('${pos.id}')">
           <div class="row">
             <div>
               <div class="pos-name">${pos.name}</div>
               <div class="pos-meta">${pos.ticker ? pos.ticker+" · " : ""}${pos.isin ? pos.isin+" · " : ""}${pos.currency}</div>
+              ${detailLine}
             </div>
             <div>
-              <div class="pos-value">${fmtCZK(c.currentValue)}</div>
-              <div class="pos-meta ${pClass}" style="text-align:right">${c.pnl>=0?'+':''}${c.pnlPct.toFixed(1)}%</div>
+              <div class="pos-value">${fmtMoney(dispCurrentValue, cur)}</div>
+              <div class="pos-meta ${pClass}" style="text-align:right">${dispPnl>=0?'+':''}${dispPnlPct.toFixed(1)}%</div>
             </div>
           </div>
         </div>`;
@@ -319,6 +526,7 @@ function renderPortfolio(){
     <button class="btn" onclick="addPosition()" style="width:100%;margin-top:10px;background:#166534">Přidat pozici</button>` : "";
 
   return `
+  ${renderHistoryChartCard()}
   <div class="card">
     <div class="row">
       <div class="card-title">Ceny</div>
@@ -327,12 +535,23 @@ function renderPortfolio(){
     <div id="prices-refresh-status" class="card-sub" style="margin-top:6px"></div>
     <div class="card-sub" style="margin-top:6px">Zdroje: Twelve Data (oficiální, US zdarma; ostatní burzy jako záložní pokus) → Stooq.com jako záloha, Atlantik.cz (OTC fondy podle ISIN). Neoficiální zdroje se občas mohou dočasně rozbít.</div>
   </div>
+  <div class="card">
+    <div class="row">
+      <div class="card-title">Zobrazení pozic</div>
+      <div class="row" style="gap:6px">
+        <button class="btn-sm" style="background:${!portfolioShowCZK?'#7c3aed':'#334155'}" onclick="setPortfolioCurrency(false)">Originál</button>
+        <button class="btn-sm" style="background:${portfolioShowCZK?'#7c3aed':'#334155'}" onclick="setPortfolioCurrency(true)">CZK</button>
+      </div>
+    </div>
+    <div class="card-sub" style="margin-top:4px">"Originál" = měna, ve které se cenný papír obchoduje. Součty v Přehledu jsou vždy v CZK.</div>
+  </div>
   ${listHtml}
   <div class="card">
     <div class="card-title" style="cursor:pointer" onclick="toggleAddPositionForm()">${addPositionFormOpen?'➖':'➕'} Přidat pozici</div>
     ${addPositionBody}
   </div>`;
 }
+function setPortfolioCurrency(showCZK){ portfolioShowCZK = showCZK; render(); }
 async function refreshAllPrices(){
   if(!S.workerUrl){ alert("Nejdřív nastav Worker URL v Adminu."); return; }
   const statusEl = document.getElementById("prices-refresh-status");
