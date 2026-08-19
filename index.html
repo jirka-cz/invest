@@ -838,13 +838,15 @@ function renderPortfolio(){
       </select>
     </div>
     <div id="np-bond-wrap" style="display:none">
-      <div class="field-label">Nominální hodnota za kus</div>
+      <button class="btn" onclick="fetchBondInfoPSE(null)" style="width:100%;margin-top:6px;background:#1e40af">🔄 Dohledat parametry z PSE (podle ISIN výše)</button>
+      <div id="np-bond-status" class="card-sub" style="margin-top:4px"></div>
+      <div class="field-label" style="margin-top:8px">Nominální hodnota za kus</div>
       <input id="np-nominal" type="number" step="0.01" placeholder="např. 10000">
       <div class="field-label">Kupón (% p.a.)</div>
       <input id="np-coupon" type="number" step="0.01" placeholder="např. 5.5">
       <div class="field-label">Datum poslední kupónové platby (nebo emise, pokud ještě žádná neproběhla)</div>
       <input id="np-lastcoupon" type="date">
-      <div class="card-sub" style="margin-top:2px">Podle toho appka dopočítá AÚV (nastřádaný úrok) k dnešnímu dni. Zjednodušený lineární výpočet, ne přesný dle emisních podmínek.</div>
+      <div class="card-sub" style="margin-top:2px">Podle toho appka dopočítá AÚV (nastřádaný úrok) k dnešnímu dni. Zjednodušený lineární výpočet, ne přesný dle emisních podmínek. Funguje jen pro dluhopisy obchodované na Pražské burze.</div>
     </div>
     <button class="btn" onclick="addPosition()" style="width:100%;margin-top:10px;background:#166534">Přidat pozici</button>` : "";
 
@@ -905,6 +907,32 @@ async function refreshAllPrices(){
   if(statusEl2) statusEl2.textContent = `✅ Aktualizováno: ${ok} · Nepodařilo se: ${fail} (${new Date().toLocaleTimeString("cs-CZ",{hour:'2-digit',minute:'2-digit'})})`;
 }
 function toggleAddPositionForm(){ addPositionFormOpen = !addPositionFormOpen; render(); }
+// Dohledá parametry dluhopisu z Pražské burzy podle ISIN a vyplní formulář.
+// posId=null → formulář "Přidat pozici" (np-*), jinak formulář editace pozice (pd-*).
+async function fetchBondInfoPSE(posId){
+  const prefix = posId ? "pd" : "np";
+  const isinEl = document.getElementById(prefix + "-isin");
+  const statusEl = document.getElementById(prefix + "-bond-status");
+  const isin = isinEl ? isinEl.value.trim().toUpperCase() : "";
+  if(!isin){ alert("Nejdřív zadej ISIN."); return; }
+  if(!S.workerUrl){ alert("Nejdřív nastav Worker URL v Adminu."); return; }
+  if(statusEl) statusEl.textContent = "⏳ Dohledávám na pse.cz...";
+  try{
+    const res = await fetch(S.workerUrl, { method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ action:"bond_info_pse", isin }) });
+    const data = await res.json();
+    if(data.error){ if(statusEl) statusEl.textContent = "⚠️ " + data.error.message; return; }
+    const nominalEl = document.getElementById(prefix + "-nominal");
+    const couponEl = document.getElementById(prefix + "-coupon");
+    const lastCouponEl = document.getElementById(prefix + "-lastcoupon");
+    if(nominalEl && data.nominal!=null) nominalEl.value = data.nominal;
+    if(couponEl && data.couponRate!=null) couponEl.value = data.couponRate;
+    if(lastCouponEl && data.lastCouponDate) lastCouponEl.value = data.lastCouponDate;
+    if(statusEl) statusEl.textContent = `✅ Dohledáno${data.issuer?' — '+data.issuer:''}${data.maturityDate?' · splatnost '+fmtDateCZ(data.maturityDate):''}`;
+  }catch(e){
+    if(statusEl) statusEl.textContent = "⚠️ Offline nebo chyba Workeru.";
+  }
+}
 function toggleNewPosCurrency(){
   const type = document.getElementById("np-type").value;
   document.getElementById("np-currency-wrap").style.display = type==="penzijni" ? "none" : "block";
@@ -1052,7 +1080,9 @@ function renderPositionDetail(id){
     <div class="field-label">Ticker</div><input id="pd-ticker" value="${pos.ticker||''}">
     <div class="field-label">ISIN</div><input id="pd-isin" value="${pos.isin||''}" style="text-transform:uppercase">
     ${pos.type==='dluhopis' ? `
-    <div class="field-label">Nominální hodnota za kus</div><input id="pd-nominal" type="number" step="0.01" value="${pos.nominal ?? ''}">
+    <button class="btn" onclick="fetchBondInfoPSE('${pos.id}')" style="width:100%;margin-top:8px;background:#1e40af">🔄 Dohledat parametry z PSE (podle ISIN výše)</button>
+    <div id="pd-bond-status" class="card-sub" style="margin-top:4px"></div>
+    <div class="field-label" style="margin-top:8px">Nominální hodnota za kus</div><input id="pd-nominal" type="number" step="0.01" value="${pos.nominal ?? ''}">
     <div class="field-label">Kupón (% p.a.)</div><input id="pd-coupon" type="number" step="0.01" value="${pos.couponRate ?? ''}">
     <div class="field-label">Datum poslední kupónové platby / emise</div><input id="pd-lastcoupon" type="date" value="${pos.lastCouponDate || ''}">` : ''}
     <button class="btn" onclick="updatePosMeta('${pos.id}')" style="width:100%;margin-top:10px;background:#166534">Uložit</button>` : ''}
