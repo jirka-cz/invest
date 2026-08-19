@@ -101,6 +101,8 @@ let addPositionFormOpen = false; // sbalený/rozbalený formulář "Přidat pozi
 let addTxFormOpen = false; // sbalený/rozbalený formulář "Přidat transakci" v detailu pozice
 let posShowCZK = false; // v detailu pozice: false = nativní měna (obchodovací), true = přepočet na CZK
 let portfolioShowCZK = false; // v seznamu pozic (Portfolio tab): false = originální měna každé pozice, true = vše přepočtené na CZK
+let collapsedGroups = {}; // { akcie: true, ... } — sbalené skupiny v Portfolio tabu
+function toggleGroup(type){ collapsedGroups[type] = !collapsedGroups[type]; render(); }
 let editingTxId = null; // pokud je nastaveno, formulář "Přidat transakci" edituje existující transakci místo přidání nové
 let editPosMetaOpen = false; // sbalený/rozbalený formulář úpravy názvu/tickeru/ISIN u existující pozice
 let autoSyncTimer = null;
@@ -124,6 +126,7 @@ function scheduleAutoSync(){
 }
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
 function fmtCZK(n){ return (Math.round(n)).toLocaleString("cs-CZ") + " Kč"; }
+function fmtDateCZ(iso){ const [y,m,d] = iso.split("-"); return `${d}.${m}.${y}`; }
 function fmtNum(n, d=2){ return Number(n).toLocaleString("cs-CZ", {minimumFractionDigits:0, maximumFractionDigits:d}); }
 function fmtMoney(n, cur){ return cur==="CZK" ? fmtCZK(n) : Number(n).toLocaleString("cs-CZ",{minimumFractionDigits:2,maximumFractionDigits:2}) + " " + cur; }
 function rateFor(cur){
@@ -230,6 +233,7 @@ async function reconstructHistory(){
       const data = await res.json();
       if(data.prices && data.prices.length){
         priceArrays[pos.id] = data.prices.map(p=>[p.date, p.close]).sort((a,b)=> a[0]<b[0]?-1:1);
+        pos.priceHistory = priceArrays[pos.id].map(([date,price])=>({date,price}));
       }
     }catch(e){ /* pozice bez historie ceny — použije se fallback níže */ }
   }
@@ -284,21 +288,63 @@ async function reconstructHistory(){
   const statusEl2 = document.getElementById("history-rebuild-status");
   if(statusEl2) statusEl2.textContent = `✅ Historie sestavena od ${firstDate} (${newHistory.length} dní) · ${new Date().toLocaleTimeString("cs-CZ",{hour:'2-digit',minute:'2-digit'})}`;
 }
-let chartRange = 'max'; // vybrané období grafu: 1m/6m/ytd/1y/5y/10y/max
+let chartRange = 'max'; // vybrané období grafu: 7d/1m/6m/ytd/1y/5y/10y/max
 function setChartRange(r){ chartRange = r; render(); }
-function filterHistoryByRange(hist){
-  if(chartRange==='max' || hist.length===0) return hist;
+function rangeCutoffDateStr(){
+  if(chartRange==='max') return null;
   const now = new Date();
   let cutoff;
-  if(chartRange==='1m'){ cutoff=new Date(now); cutoff.setMonth(cutoff.getMonth()-1); }
+  if(chartRange==='7d'){ cutoff=new Date(now); cutoff.setDate(cutoff.getDate()-7); }
+  else if(chartRange==='1m'){ cutoff=new Date(now); cutoff.setMonth(cutoff.getMonth()-1); }
   else if(chartRange==='6m'){ cutoff=new Date(now); cutoff.setMonth(cutoff.getMonth()-6); }
   else if(chartRange==='ytd'){ cutoff=new Date(now.getFullYear(),0,1); }
   else if(chartRange==='1y'){ cutoff=new Date(now); cutoff.setFullYear(cutoff.getFullYear()-1); }
   else if(chartRange==='5y'){ cutoff=new Date(now); cutoff.setFullYear(cutoff.getFullYear()-5); }
   else if(chartRange==='10y'){ cutoff=new Date(now); cutoff.setFullYear(cutoff.getFullYear()-10); }
-  else return hist;
-  const cutoffStr = localISODate(cutoff);
+  else return null;
+  return localISODate(cutoff);
+}
+function filterHistoryByRange(hist){
+  const cutoffStr = rangeCutoffDateStr();
+  if(!cutoffStr || hist.length===0) return hist;
   return hist.filter(h=>h.date>=cutoffStr);
+}
+function filterSeriesByRange(series){
+  const cutoffStr = rangeCutoffDateStr();
+  if(!cutoffStr || series.length===0) return series;
+  return series.filter(s=>s.date>=cutoffStr);
+}
+const CHART_GRANULARITY = { '7d':'day', '1m':'day', '6m':'month', 'ytd':'month', '1y':'month', '5y':'year', '10y':'year', 'max':'year' };
+// Sestaví popisky osy X podle zvolené granularity: dny (DD.MM.) / měsíce (MM.YYYY) / roky (YYYY)
+function buildXAxisTicks(minD, maxD, granularity){
+  const DAY = 86400000;
+  const ticks = [];
+  if(granularity === 'day'){
+    const totalDays = Math.max(1, Math.round((maxD-minD)/DAY));
+    const step = Math.max(1, Math.ceil(totalDays/5));
+    for(let d=0; d<=totalDays; d+=step){
+      const t = minD + d*DAY;
+      const dt = new Date(t);
+      ticks.push({ t, label: `${String(dt.getUTCDate()).padStart(2,'0')}.${String(dt.getUTCMonth()+1).padStart(2,'0')}.` });
+    }
+  } else if(granularity === 'month'){
+    let cur = new Date(minD); cur = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth(), 1));
+    const months = [];
+    while(cur.getTime() <= maxD){ months.push(new Date(cur)); cur = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth()+1, 1)); }
+    if(months.length===0) months.push(new Date(minD));
+    const step = Math.max(1, Math.ceil(months.length/6));
+    for(let i=0;i<months.length;i+=step){
+      const m = months[i];
+      ticks.push({ t: Math.max(m.getTime(), minD), label: `${String(m.getUTCMonth()+1).padStart(2,'0')}.${m.getUTCFullYear()}` });
+    }
+  } else { // year
+    const startY = new Date(minD).getUTCFullYear(), endY = new Date(maxD).getUTCFullYear();
+    for(let y=startY; y<=endY; y++){
+      const t = Math.max(Date.UTC(y,0,1), minD);
+      ticks.push({ t, label: String(y) });
+    }
+  }
+  return ticks;
 }
 // "Hezká" čísla pro osu Y (jako u běžných investičních appek — kulaté kroky, ne min/max náhodně)
 function niceNum(range, round){
@@ -332,7 +378,7 @@ function niceTicks(min, max, maxTicks){
 function buildHistoryChartHTML(){
   const fullHist = [...(P.history||[])].sort((a,b)=>a.date.localeCompare(b.date));
   const hist = filterHistoryByRange(fullHist);
-  const rangeBtns = [['1m','1M'],['6m','6M'],['ytd','YTD'],['1y','1R'],['5y','5R'],['10y','10R'],['max','Max']]
+  const rangeBtns = [['7d','7D'],['1m','1M'],['6m','6M'],['ytd','YTD'],['1y','1R'],['5y','5R'],['10y','10R'],['max','Max']]
     .map(([r,label])=> `<button class="btn-sm" style="flex:none;background:${chartRange===r?'#7c3aed':'#334155'}" onclick="setChartRange('${r}')">${label}</button>`)
     .join("");
   const rangeSelector = `<div style="display:flex;gap:6px;overflow-x:auto;margin-top:10px;padding-bottom:2px">${rangeBtns}</div>`;
@@ -343,7 +389,7 @@ function buildHistoryChartHTML(){
   if(hist.length < 2){
     return `<div class="empty-hint">V tomto období nejsou žádná data. Zkus širší rozsah.</div>${rangeSelector}`;
   }
-  const W=600,H=190,padL=52,padR=10,padT=10,padB=24;
+  const W=600,H=200,padL=52,padR=10,padT=10,padB=26;
   const plotW=W-padL-padR, plotH=H-padT-padB;
   const dates = hist.map(h=> new Date(h.date+"T00:00:00Z").getTime());
   const minD=dates[0], maxD=dates[dates.length-1];
@@ -361,12 +407,17 @@ function buildHistoryChartHTML(){
     return `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W-padR}" y2="${y.toFixed(1)}" stroke="#1e293b" stroke-width="1"></line>
       <text x="2" y="${(y+3).toFixed(1)}" fill="#475569" font-size="9">${fmtCZK(v)}</text>`;
   }).join("");
+  const xTicks = buildXAxisTicks(minD, maxD, CHART_GRANULARITY[chartRange] || 'month');
+  const xAxisLabels = xTicks.map(tk=>{
+    const x = xFor(tk.t);
+    return `<text x="${x.toFixed(1)}" y="${H-6}" fill="#475569" font-size="9" text-anchor="middle">${tk.label}</text>`;
+  }).join("");
 
   return `
   <div style="position:relative">
     <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;touch-action:pan-y"
          onmousemove="chartHover(event,this)" ontouchstart="chartHover(event.touches[0],this)" ontouchmove="chartHover(event.touches[0],this)"
-         onmouseleave="chartHoverEnd(this)" ontouchend="chartHoverEnd(this)" data-points='${dataJson}'>
+         onmouseleave="chartHoverEnd(this)" ontouchend="chartHoverEnd(this)" data-points='${dataJson}' data-mode="pair" data-cur="CZK">
       <defs>
         <linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stop-color="#7c3aed" stop-opacity="0.35"/>
@@ -377,6 +428,7 @@ function buildHistoryChartHTML(){
       <polygon points="${areaPts}" fill="url(#chartFill)" stroke="none"></polygon>
       <polyline points="${investedPts}" fill="none" stroke="#475569" stroke-width="1.5" stroke-dasharray="4,3"></polyline>
       <polyline points="${linePts}" fill="none" stroke="#7c3aed" stroke-width="2"></polyline>
+      ${xAxisLabels}
       <line class="chart-guide" x1="0" y1="${padT}" x2="0" y2="${padT+plotH}" stroke="#334155" stroke-width="1" style="display:none"></line>
       <circle class="chart-dot" r="4" fill="#a78bfa" stroke="#0a0f1e" stroke-width="2" style="display:none"></circle>
     </svg>
@@ -403,9 +455,15 @@ function chartHover(evt, svgEl){
   if(guide){ guide.setAttribute('x1', nearest.x); guide.setAttribute('x2', nearest.x); guide.style.display='block'; }
   const tip = svgEl.parentElement.querySelector('.chart-tooltip');
   if(tip){
-    const diff = nearest.v - nearest.inv;
-    const diffPct = nearest.inv ? (diff/Math.abs(nearest.inv)*100) : 0;
-    tip.innerHTML = `<b>${nearest.date}</b><br>${fmtCZK(nearest.v)}<br><span style="color:${diff>=0?'#22c55e':'#ef4444'}">${diff>=0?'+':''}${fmtCZK(diff)} (${diffPct.toFixed(1)}%)</span>`;
+    const mode = svgEl.getAttribute('data-mode') || 'pair';
+    const cur = svgEl.getAttribute('data-cur') || 'CZK';
+    if(mode === 'single'){
+      tip.innerHTML = `<b>${fmtDateCZ(nearest.date)}</b><br>${fmtMoney(nearest.v, cur)}`;
+    } else {
+      const diff = nearest.v - nearest.inv;
+      const diffPct = nearest.inv ? (diff/Math.abs(nearest.inv)*100) : 0;
+      tip.innerHTML = `<b>${fmtDateCZ(nearest.date)}</b><br>${fmtCZK(nearest.v)}<br><span style="color:${diff>=0?'#22c55e':'#ef4444'}">${diff>=0?'+':''}${fmtCZK(diff)} (${diffPct.toFixed(1)}%)</span>`;
+    }
     tip.style.display='block';
     const leftPct = (nearest.x/vb.width*100);
     tip.style.left = Math.min(Math.max(leftPct,8),68) + '%';
@@ -428,6 +486,66 @@ function renderHistoryChartCard(){
     <div class="card-sub" style="margin-top:4px">Přesně dopočítá "vloženo" z dat transakcí a "aktuální hodnotu" z historických cen (Twelve Data). U OTC fondů/pozic bez historických cen se historicky použije poslední známá cena zpětně — je to odhad, ne skutečný dobový vývoj.</div>
   </div>`;
 }
+// Graf vývoje ceny JEDNÉ pozice (zobrazí se v detailu) — čerpá z pos.priceHistory,
+// který se naplní tlačítkem "Sestavit historii ze zpětných dat" v Portfoliu.
+// Vždy v nativní (obchodovací) měně pozice — bez přepočtu na CZK.
+function buildPriceHistoryChartHTML(pos){
+  const full = [...(pos.priceHistory||[])].sort((a,b)=>a.date.localeCompare(b.date));
+  const rangeBtns = [['7d','7D'],['1m','1M'],['6m','6M'],['ytd','YTD'],['1y','1R'],['5y','5R'],['10y','10R'],['max','Max']]
+    .map(([r,label])=> `<button class="btn-sm" style="flex:none;background:${chartRange===r?'#7c3aed':'#334155'}" onclick="setChartRange('${r}')">${label}</button>`)
+    .join("");
+  const rangeSelector = `<div style="display:flex;gap:6px;overflow-x:auto;margin-top:10px;padding-bottom:2px">${rangeBtns}</div>`;
+  if(full.length < 2){
+    return `<div class="empty-hint">Historie ceny zatím není k dispozici. Jdi do Portfolia a klikni na "Sestavit historii ze zpětných dat" — stáhne se historická cena pro tuhle pozici (funguje pro akcie/ETF/krypto s tickerem).</div>`;
+  }
+  const hist = filterSeriesByRange(full);
+  if(hist.length < 2){
+    return `<div class="empty-hint">V tomto období nejsou data. Zkus širší rozsah.</div>${rangeSelector}`;
+  }
+  const W=600,H=190,padL=52,padR=10,padT=10,padB=26;
+  const plotW=W-padL-padR, plotH=H-padT-padB;
+  const dates = hist.map(h=> new Date(h.date+"T00:00:00Z").getTime());
+  const minD=dates[0], maxD=dates[dates.length-1];
+  const vals = hist.map(h=>h.price);
+  const { ticks, niceMin, niceMax } = niceTicks(Math.min(...vals), Math.max(...vals), 4);
+  const xFor = (t) => padL + (maxD===minD ? plotW/2 : (t-minD)/(maxD-minD)*plotW);
+  const yFor = (v) => padT + plotH - ((v-niceMin)/(niceMax-niceMin))*plotH;
+  const linePts = hist.map((h,i)=> `${xFor(dates[i]).toFixed(1)},${yFor(h.price).toFixed(1)}`).join(" ");
+  const areaPts = `${xFor(dates[0]).toFixed(1)},${(padT+plotH).toFixed(1)} ${linePts} ${xFor(dates[dates.length-1]).toFixed(1)},${(padT+plotH).toFixed(1)}`;
+  const dataPts = hist.map((h,i)=>({ x:+xFor(dates[i]).toFixed(1), y:+yFor(h.price).toFixed(1), date:h.date, v:h.price, inv:h.price }));
+  const dataJson = JSON.stringify(dataPts);
+  const gridLines = ticks.map(v=>{
+    const y = yFor(v);
+    return `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W-padR}" y2="${y.toFixed(1)}" stroke="#1e293b" stroke-width="1"></line>
+      <text x="2" y="${(y+3).toFixed(1)}" fill="#475569" font-size="9">${fmtMoney(v,pos.currency)}</text>`;
+  }).join("");
+  const xTicks = buildXAxisTicks(minD, maxD, CHART_GRANULARITY[chartRange] || 'month');
+  const xAxisLabels = xTicks.map(tk=>{
+    const x = xFor(tk.t);
+    return `<text x="${x.toFixed(1)}" y="${H-6}" fill="#475569" font-size="9" text-anchor="middle">${tk.label}</text>`;
+  }).join("");
+  return `
+  <div style="position:relative">
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;touch-action:pan-y"
+         onmousemove="chartHover(event,this)" ontouchstart="chartHover(event.touches[0],this)" ontouchmove="chartHover(event.touches[0],this)"
+         onmouseleave="chartHoverEnd(this)" ontouchend="chartHoverEnd(this)" data-points='${dataJson}' data-mode="single" data-cur="${pos.currency}">
+      <defs>
+        <linearGradient id="chartFillPrice" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#06b6d4" stop-opacity="0.35"/>
+          <stop offset="100%" stop-color="#06b6d4" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      ${gridLines}
+      <polygon points="${areaPts}" fill="url(#chartFillPrice)" stroke="none"></polygon>
+      <polyline points="${linePts}" fill="none" stroke="#06b6d4" stroke-width="2"></polyline>
+      ${xAxisLabels}
+      <line class="chart-guide" x1="0" y1="${padT}" x2="0" y2="${padT+plotH}" stroke="#334155" stroke-width="1" style="display:none"></line>
+      <circle class="chart-dot" r="4" fill="#67e8f9" stroke="#0a0f1e" stroke-width="2" style="display:none"></circle>
+    </svg>
+    <div class="chart-tooltip" style="display:none;position:absolute;top:4px;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:6px 9px;font-size:11px;pointer-events:none;white-space:nowrap;z-index:5"></div>
+  </div>
+  ${rangeSelector}`;
+}
 
 // ── NAVIGACE ─────────────────────────────────────────────────────────────
 function showTab(tab){
@@ -445,6 +563,59 @@ function render(){
 }
 
 // ── PŘEHLED ─────────────────────────────────────────────────────────────
+function portfolioByCurrency(){
+  const byCur = {};
+  P.positions.forEach(pos=>{
+    const c = calcPosition(pos);
+    const cur = pos.currency;
+    const val = pos.type==="penzijni" ? c.currentValue : c.currentValueNative;
+    byCur[cur] = (byCur[cur]||0) + val;
+  });
+  return byCur;
+}
+function buildAllocationPieHTML(byType, total){
+  const entries = Object.entries(byType).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
+  if(entries.length===0 || total<=0) return '<div class="empty-hint">Žádná data k zobrazení.</div>';
+  const R=70, CX=90, CY=90;
+  let cumAngle = -90;
+  const paths = entries.map(([type,val],i)=>{
+    const pct = val/total;
+    const angle = pct*360;
+    const startAngle = cumAngle, endAngle = cumAngle+angle;
+    cumAngle = endAngle;
+    const largeArc = angle>180 ? 1 : 0;
+    const startRad = startAngle*Math.PI/180, endRad = endAngle*Math.PI/180;
+    const x1 = CX + R*Math.cos(startRad), y1 = CY + R*Math.sin(startRad);
+    const x2 = CX + R*Math.cos(endRad), y2 = CY + R*Math.sin(endRad);
+    // celý koláč (jediná kategorie, 100%) potřebuje kruh místo výseče, jinak by cesta zdegenerovala
+    const d = entries.length===1
+      ? `M${CX-R},${CY} A${R},${R} 0 1 1 ${CX+R},${CY} A${R},${R} 0 1 1 ${CX-R},${CY} Z`
+      : `M${CX},${CY} L${x1.toFixed(2)},${y1.toFixed(2)} A${R},${R} 0 ${largeArc} 1 ${x2.toFixed(2)},${y2.toFixed(2)} Z`;
+    return `<path d="${d}" fill="${TYPE_COLOR[type]}" stroke="#111827" stroke-width="2" style="cursor:pointer" data-label="${TYPE_LABEL[type]}" data-value="${fmtCZK(val)}" data-pct="${(pct*100).toFixed(1)}" onclick="pieSliceTap(this)" onmouseenter="pieSliceTap(this)"></path>`;
+  }).join("");
+  const legend = entries.map(([type,val])=>{
+    const pct = total ? (val/total*100) : 0;
+    return `<div class="row" style="margin-top:6px;font-size:12px">
+      <span><span class="type-badge type-${type}">${TYPE_LABEL[type]}</span></span>
+      <span style="color:#94a3b8">${fmtCZK(val)} · ${pct.toFixed(1)}%</span>
+    </div>`;
+  }).join("");
+  return `<div style="position:relative;max-width:220px;margin:0 auto">
+    <svg viewBox="0 0 180 180" style="width:100%;height:auto;display:block">
+      ${paths}
+      <circle cx="90" cy="90" r="40" fill="#111827"></circle>
+    </svg>
+    <div id="pie-tooltip" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none;font-size:11px;color:#94a3b8;line-height:1.4">Klepni na<br>výseč</div>
+  </div>
+  ${legend}`;
+}
+function pieSliceTap(el){
+  const svg = el.closest('svg');
+  svg.querySelectorAll('path').forEach(p=> p.setAttribute('stroke-width','2'));
+  el.setAttribute('stroke-width','4');
+  const tip = document.getElementById('pie-tooltip');
+  if(tip) tip.innerHTML = `<b>${el.dataset.label}</b><br>${el.dataset.value}<br>${el.dataset.pct}%`;
+}
 function renderPrehled(){
   if(P.positions.length === 0){
     return `<div class="card">
@@ -455,42 +626,19 @@ function renderPrehled(){
   recordDailySnapshot();
   const t = portfolioTotals();
   const pnlClass = t.pnl >= 0 ? "pnl-pos" : "pnl-neg";
-  const typeEntries = Object.entries(t.byType).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
-  const allocBars = typeEntries.map(([type,val])=>{
-    const pct = t.currentValue ? (val/t.currentValue*100) : 0;
-    return `<div class="alloc-seg" style="width:${pct}%;background:${TYPE_COLOR[type]}" title="${TYPE_LABEL[type]} ${pct.toFixed(0)}%"></div>`;
-  }).join("");
-  const allocList = typeEntries.map(([type,val])=>{
-    const pct = t.currentValue ? (val/t.currentValue*100) : 0;
-    return `<div class="row" style="margin-top:6px;font-size:12px">
-      <span><span class="type-badge type-${type}">${TYPE_LABEL[type]}</span></span>
-      <span style="color:#94a3b8">${fmtCZK(val)} · ${pct.toFixed(1)}%</span>
-    </div>`;
-  }).join("");
-
-  const posRows = [...P.positions].map(pos=>({pos, c: calcPosition(pos)}))
-    .sort((a,b)=> b.c.currentValue - a.c.currentValue)
-    .map(({pos,c})=>{
-      const pClass = c.pnl>=0 ? "pnl-pos" : "pnl-neg";
-      return `<div class="pos-item" onclick="showTab('portfolio');openPosition('${pos.id}')">
-        <div class="row">
-          <div>
-            <div class="pos-name">${pos.name}</div>
-            <div class="pos-meta"><span class="type-badge type-${pos.type}">${TYPE_LABEL[pos.type]}</span></div>
-          </div>
-          <div>
-            <div class="pos-value">${fmtCZK(c.currentValue)}</div>
-            <div class="pos-meta ${pClass}" style="text-align:right">${c.pnl>=0?'+':''}${fmtCZK(c.pnl)} (${c.pnlPct.toFixed(1)}%)</div>
-          </div>
-        </div>
-      </div>`;
-    }).join("");
+  const byCur = portfolioByCurrency();
+  const curEntries = Object.entries(byCur).filter(([,v])=>Math.abs(v)>0.01);
+  const curBreakdown = curEntries.length > 1 ? `
+    <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:10px">
+      ${curEntries.map(([cur,val])=> `<div class="pos-meta">${cur}: <b style="color:#e2e8f0">${fmtMoney(val,cur)}</b></div>`).join("")}
+    </div>` : "";
 
   return `
   <div class="card">
     <div class="card-title">Hodnota portfolia</div>
     <div style="font-size:28px;font-weight:800;margin-top:6px">${fmtCZK(t.currentValue)}</div>
     <div class="${pnlClass}" style="font-size:13px;font-weight:700;margin-top:2px">${t.pnl>=0?'+':''}${fmtCZK(t.pnl)} (${t.pnl>=0?'+':''}${t.pnlPct.toFixed(1)} %)</div>
+    ${curBreakdown}
     <div class="grid2" style="margin-top:12px">
       <div class="stat-box"><div class="stat-num">${fmtCZK(t.invested)}</div><div class="stat-lbl">VLOŽENO CELKEM</div></div>
       <div class="stat-box"><div class="stat-num">${P.positions.length}</div><div class="stat-lbl">POČET POZIC</div></div>
@@ -499,13 +647,7 @@ function renderPrehled(){
 
   <div class="card">
     <div class="card-title">Alokace podle třídy aktiv</div>
-    <div class="alloc-bar">${allocBars}</div>
-    ${allocList}
-  </div>
-
-  <div class="card">
-    <div class="card-title">Pozice</div>
-    ${posRows}
+    ${buildAllocationPieHTML(t.byType, t.currentValue)}
   </div>
 
   ${renderHistoryChartCard()}`;
@@ -551,7 +693,10 @@ function renderPortfolio(){
           </div>
         </div>`;
       }).join("");
-      listHtml += `<div class="card"><div class="card-title">${TYPE_LABEL[type]}</div>${items}</div>`;
+      listHtml += `<div class="card">
+        <div class="card-title" style="cursor:pointer" onclick="toggleGroup('${type}')">${collapsedGroups[type]?'▸':'▾'} ${TYPE_LABEL[type]} <span style="color:#64748b;font-weight:400">(${groups[type].length})</span></div>
+        ${collapsedGroups[type] ? '' : items}
+      </div>`;
     });
   }
 
@@ -581,7 +726,6 @@ function renderPortfolio(){
     <button class="btn" onclick="addPosition()" style="width:100%;margin-top:10px;background:#166534">Přidat pozici</button>` : "";
 
   return `
-  ${renderHistoryChartCard()}
   <div class="card">
     <div class="row">
       <div class="card-title">Ceny</div>
@@ -762,6 +906,11 @@ function renderPositionDetail(id){
     ${!isPenzijni ? `<div class="pos-meta" style="margin-top:8px">Držíš: ${fmtNum(c.qty,4)} ks · Vloženo: ${fmtMoney(dispInvested, dispCur)}</div>` : `<div class="pos-meta" style="margin-top:8px">Vloženo celkem: ${fmtCZK(c.invested)}</div>`}
     ${currencyToggle}
   </div>
+
+  ${!isPenzijni ? `<div class="card">
+    <div class="card-title">Vývoj ceny</div>
+    ${buildPriceHistoryChartHTML(pos)}
+  </div>` : ''}
 
   <div class="card">
     <div class="card-title" style="cursor:pointer" onclick="toggleEditPosMeta()">${editPosMetaOpen?'➖':'✏️'} Upravit název / ticker / ISIN</div>
