@@ -325,7 +325,7 @@ function renderPortfolio(){
     </div>
     <button class="btn" onclick="refreshAllPrices()" style="width:100%;margin-top:8px;background:#1e40af">🔄 Aktualizovat všechny ceny</button>
     <div id="prices-refresh-status" class="card-sub" style="margin-top:6px"></div>
-    <div class="card-sub" style="margin-top:6px">Zdroje: Stooq.com (akcie/ETF podle tickeru), Atlantik.cz (OTC fondy podle ISIN) — neoficiální bezplatné zdroje, občas se mohou dočasně rozbít.</div>
+    <div class="card-sub" style="margin-top:6px">Zdroje: Twelve Data (oficiální, US zdarma; ostatní burzy jako záložní pokus) → Stooq.com jako záloha, Atlantik.cz (OTC fondy podle ISIN). Neoficiální zdroje se občas mohou dočasně rozbít.</div>
   </div>
   ${listHtml}
   <div class="card">
@@ -347,12 +347,13 @@ async function refreshAllPrices(){
       if(pos.type === "fond"){
         res = await fetch(S.workerUrl, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ action:"price_fund_atlantik", isin: pos.isin }) });
       } else {
-        res = await fetch(S.workerUrl, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ action:"price_stooq", symbol: pos.ticker }) });
+        res = await fetch(S.workerUrl, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ action:"price_stock", symbol: pos.ticker }) });
       }
       data = await res.json();
       if(data.price){
         pos.currentPrice = data.price;
         pos.currentPriceDate = data.date || localISODate(new Date());
+        pos.currentPriceSource = data.source || (pos.type==="fond" ? "atlantik.cz" : null);
         ok++;
       } else fail++;
     }catch(e){ fail++; }
@@ -443,7 +444,7 @@ function renderPositionDetail(id){
        <div class="row"><input id="pd-currentvalue" type="number" step="0.01" value="${pos.currentValue ?? c.invested}"><button class="btn-sm" style="background:#334155" onclick="updateCurrentValue('${pos.id}')">Uložit</button></div>`
     : `<div class="field-label">Aktuální cena za kus (${nativeCur})</div>
        <div class="row"><input id="pd-currentprice" type="number" step="0.0001" value="${pos.currentPrice ?? ''}" placeholder="${pos.type==='fond' ? 'zadej ručně nebo dohledej podle ISIN' : 'zadej ručně nebo dohledej podle tickeru'}"><button class="btn-sm" style="background:#334155" onclick="updateCurrentPrice('${pos.id}')">Uložit</button></div>
-       ${pos.currentPriceDate ? `<div class="pos-meta" style="margin-top:4px">Naposledy staženo automaticky: ${pos.currentPriceDate}</div>` : ''}
+       ${pos.currentPriceDate ? `<div class="pos-meta" style="margin-top:4px">Naposledy staženo automaticky${pos.currentPriceSource?(' ('+pos.currentPriceSource+')'):''}: ${pos.currentPriceDate}</div>` : ''}
        ${nativeCur!=="CZK" ? `<div class="pos-meta" style="margin-top:6px">Aktuální kurz ${nativeCur}/CZK: ${fmtNum(rateFor(nativeCur),3)} ${S.liveRates[nativeCur]?(' · ČNB k '+S.liveRates[nativeCur].date):' (záložní, ruční)'} <button class="btn-sm" style="background:#334155;padding:2px 8px;margin-left:6px" onclick="refreshLiveRate('${nativeCur}')">🔄</button></div>` : ''}`;
 
   const txFormFields = isPenzijni
@@ -540,6 +541,7 @@ function updateCurrentPrice(id){
   const v = parseFloat(document.getElementById("pd-currentprice").value);
   pos.currentPrice = isNaN(v) ? null : v;
   pos.currentPriceDate = null; // ruční zadání přepisuje případnou automatickou hodnotu
+  pos.currentPriceSource = null;
   savePortfolio(); render();
 }
 function updateCurrentValue(id){
