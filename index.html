@@ -628,7 +628,8 @@ function renderPrehled(){
   const pnlClass = t.pnl >= 0 ? "pnl-pos" : "pnl-neg";
   const byCur = portfolioByCurrency();
   const curEntries = Object.entries(byCur).filter(([,v])=>Math.abs(v)>0.01);
-  const curBreakdown = curEntries.length > 1 ? `
+  const showBreakdown = curEntries.some(([cur])=>cur!=="CZK");
+  const curBreakdown = showBreakdown ? `
     <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:10px">
       ${curEntries.map(([cur,val])=> `<div class="pos-meta">${cur}: <b style="color:#e2e8f0">${fmtMoney(val,cur)}</b></div>`).join("")}
     </div>` : "";
