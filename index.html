@@ -857,7 +857,7 @@ function renderPortfolio(){
     </div>
     <button class="btn" onclick="refreshAllPrices()" style="width:100%;margin-top:8px;background:#1e40af">🔄 Aktualizovat všechny ceny</button>
     <div id="prices-refresh-status" class="card-sub" style="margin-top:6px"></div>
-    <div class="card-sub" style="margin-top:6px">Zdroje: Twelve Data (oficiální, US zdarma) → Yahoo Finance (neoficiální, nejširší pokrytí burz včetně Prahy/Londýna) → Stooq.com jako poslední záloha. Fondy (OTC): Atlantik.cz podle ISIN. Neoficiální zdroje se občas mohou dočasně rozbít.</div>
+    <div class="card-sub" style="margin-top:6px">Zdroje: Twelve Data (oficiální, US zdarma) → Yahoo Finance (neoficiální, nejširší pokrytí burz včetně Prahy/Londýna) → Stooq.com jako poslední záloha. Fondy (OTC): Atlantik.cz podle ISIN. Dluhopisy: pse.cz podle ISIN. Neoficiální zdroje se občas mohou dočasně rozbít.</div>
   </div>
   <div class="card">
     <div class="row">
@@ -879,8 +879,9 @@ function setPortfolioCurrency(showCZK){ portfolioShowCZK = showCZK; render(); }
 async function refreshAllPrices(){
   if(!S.workerUrl){ alert("Nejdřív nastav Worker URL v Adminu."); return; }
   const statusEl = document.getElementById("prices-refresh-status");
-  const updatable = P.positions.filter(p => p.type!=="penzijni" && p.type!=="dluhopis" && ((p.type==="fond" && p.isin) || (p.type!=="fond" && p.ticker)));
-  if(updatable.length===0){ if(statusEl) statusEl.textContent = "Žádné pozice s tickerem (akcie/ETF/krypto) nebo ISIN (OTC fond) k aktualizaci."; return; }
+  const updatable = P.positions.filter(p => p.type!=="penzijni" &&
+    ((p.type==="fond" && p.isin) || (p.type==="dluhopis" && p.isin) || (p.type!=="fond" && p.type!=="dluhopis" && p.ticker)));
+  if(updatable.length===0){ if(statusEl) statusEl.textContent = "Žádné pozice s tickerem (akcie/ETF/krypto), ISIN OTC fondu nebo ISIN dluhopisu k aktualizaci."; return; }
   let ok=0, fail=0;
   for(let i=0;i<updatable.length;i++){
     const pos = updatable[i];
@@ -889,16 +890,36 @@ async function refreshAllPrices(){
       let res, data;
       if(pos.type === "fond"){
         res = await fetch(S.workerUrl, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ action:"price_fund_atlantik", isin: pos.isin }) });
+        data = await res.json();
+        if(data.price){
+          pos.currentPrice = data.price;
+          pos.currentPriceDate = data.date || localISODate(new Date());
+          pos.currentPriceSource = data.source || "atlantik.cz";
+          ok++;
+        } else fail++;
+      } else if(pos.type === "dluhopis"){
+        res = await fetch(S.workerUrl, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ action:"bond_info_pse", isin: pos.isin }) });
+        data = await res.json();
+        if(data.currentPrice != null){
+          pos.currentPrice = data.currentPrice;
+          pos.currentPriceDate = localISODate(new Date());
+          pos.currentPriceSource = "pse.cz";
+          // parametry doplníme jen tam, kde ještě chybí — ať nepřepisujeme ruční opravy
+          if(pos.nominal == null && data.nominal != null) pos.nominal = data.nominal;
+          if(pos.couponRate == null && data.couponRate != null) pos.couponRate = data.couponRate;
+          if(pos.lastCouponDate == null && data.lastCouponDate) pos.lastCouponDate = data.lastCouponDate;
+          ok++;
+        } else fail++;
       } else {
         res = await fetch(S.workerUrl, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ action:"price_stock", symbol: pos.ticker }) });
+        data = await res.json();
+        if(data.price){
+          pos.currentPrice = data.price;
+          pos.currentPriceDate = data.date || localISODate(new Date());
+          pos.currentPriceSource = data.source || null;
+          ok++;
+        } else fail++;
       }
-      data = await res.json();
-      if(data.price){
-        pos.currentPrice = data.price;
-        pos.currentPriceDate = data.date || localISODate(new Date());
-        pos.currentPriceSource = data.source || (pos.type==="fond" ? "atlantik.cz" : null);
-        ok++;
-      } else fail++;
     }catch(e){ fail++; }
   }
   savePortfolio();
