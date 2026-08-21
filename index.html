@@ -718,6 +718,8 @@ function renderPrehled(){
         <div class="stat-box"><div class="stat-num">${fmtCZK(t.invested)}</div><div class="stat-lbl">VLOŽENO CELKEM</div></div>
         <div class="stat-box"><div class="stat-num">${P.positions.length}</div><div class="stat-lbl">POČET POZIC</div></div>
       </div>
+      <button class="btn" onclick="refreshPricesAndHistory()" style="width:100%;margin-top:12px;background:#1e40af">🔄 Aktualizovat ceny a graf</button>
+      <div id="overview-refresh-status" class="card-sub" style="margin-top:6px"></div>
     </div>
 
     <div class="card">
@@ -876,9 +878,10 @@ function renderPortfolio(){
   </div>`;
 }
 function setPortfolioCurrency(showCZK){ portfolioShowCZK = showCZK; render(); }
-async function refreshAllPrices(){
+async function refreshAllPrices(statusElId){
+  statusElId = statusElId || "prices-refresh-status";
   if(!S.workerUrl){ alert("Nejdřív nastav Worker URL v Adminu."); return; }
-  const statusEl = document.getElementById("prices-refresh-status");
+  const statusEl = document.getElementById(statusElId);
   const updatable = P.positions.filter(p => p.type!=="penzijni" &&
     ((p.type==="fond" && p.isin) || (p.type==="dluhopis" && p.isin) || (p.type!=="fond" && p.type!=="dluhopis" && p.ticker)));
   if(updatable.length===0){ if(statusEl) statusEl.textContent = "Žádné pozice s tickerem (akcie/ETF/krypto), ISIN OTC fondu nebo ISIN dluhopisu k aktualizaci."; return; }
@@ -924,8 +927,15 @@ async function refreshAllPrices(){
   }
   savePortfolio();
   render();
-  const statusEl2 = document.getElementById("prices-refresh-status");
+  const statusEl2 = document.getElementById(statusElId);
   if(statusEl2) statusEl2.textContent = `✅ Aktualizováno: ${ok} · Nepodařilo se: ${fail} (${new Date().toLocaleTimeString("cs-CZ",{hour:'2-digit',minute:'2-digit'})})`;
+  return { ok, fail };
+}
+// Aktualizuje ceny VŠECH pozic a hned na to přepočítá i graf vývoje hodnoty ze zpětných dat —
+// jedno tlačítko, dvě fáze (postup vidíš zvlášť u cen a zvlášť u grafu).
+async function refreshPricesAndHistory(){
+  await refreshAllPrices("overview-refresh-status");
+  await reconstructHistory();
 }
 function toggleAddPositionForm(){ addPositionFormOpen = !addPositionFormOpen; pendingBondPrice = null; render(); }
 // Dohledá parametry dluhopisu z Pražské burzy podle ISIN a vyplní formulář.
