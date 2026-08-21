@@ -906,9 +906,10 @@ async function refreshAllPrices(){
   const statusEl2 = document.getElementById("prices-refresh-status");
   if(statusEl2) statusEl2.textContent = `✅ Aktualizováno: ${ok} · Nepodařilo se: ${fail} (${new Date().toLocaleTimeString("cs-CZ",{hour:'2-digit',minute:'2-digit'})})`;
 }
-function toggleAddPositionForm(){ addPositionFormOpen = !addPositionFormOpen; render(); }
+function toggleAddPositionForm(){ addPositionFormOpen = !addPositionFormOpen; pendingBondPrice = null; render(); }
 // Dohledá parametry dluhopisu z Pražské burzy podle ISIN a vyplní formulář.
 // posId=null → formulář "Přidat pozici" (np-*), jinak formulář editace pozice (pd-*).
+let pendingBondPrice = null; // dočasné uložení ceny dohledané z PSE při vyplňování formuláře "Přidat pozici" (pozice ještě neexistuje)
 async function fetchBondInfoPSE(posId){
   const prefix = posId ? "pd" : "np";
   const isinEl = document.getElementById(prefix + "-isin");
@@ -928,7 +929,27 @@ async function fetchBondInfoPSE(posId){
     if(nominalEl && data.nominal!=null) nominalEl.value = data.nominal;
     if(couponEl && data.couponRate!=null) couponEl.value = data.couponRate;
     if(lastCouponEl && data.lastCouponDate) lastCouponEl.value = data.lastCouponDate;
-    if(statusEl) statusEl.textContent = `✅ Dohledáno${data.issuer?' — '+data.issuer:''}${data.maturityDate?' · splatnost '+fmtDateCZ(data.maturityDate):''}`;
+
+    let priceNote = "";
+    if(data.currentPrice != null){
+      priceNote = ` · aktuální cena ${fmtNum(data.pricePct,2)} % (${fmtMoney(data.currentPrice,'CZK')}/ks)`;
+      if(posId){
+        // pozice už existuje → cenu rovnou uložíme (needěláme render(), ať nezahodíme rozepsanou editaci výše)
+        const pos = P.positions.find(p=>p.id===posId);
+        if(pos){
+          pos.currentPrice = data.currentPrice;
+          pos.currentPriceDate = localISODate(new Date());
+          pos.currentPriceSource = "pse.cz";
+          savePortfolio();
+          const priceEl = document.getElementById("pd-currentprice");
+          if(priceEl) priceEl.value = data.currentPrice;
+        }
+      } else {
+        // pozice ještě neexistuje → cenu použijeme, až se vytvoří (viz addPosition)
+        pendingBondPrice = data.currentPrice;
+      }
+    }
+    if(statusEl) statusEl.textContent = `✅ Dohledáno${data.issuer?' — '+data.issuer:''}${data.maturityDate?' · splatnost '+fmtDateCZ(data.maturityDate):''}${priceNote}`;
   }catch(e){
     if(statusEl) statusEl.textContent = "⚠️ Offline nebo chyba Workeru.";
   }
@@ -954,6 +975,12 @@ function addPosition(){
     pos.nominal = isNaN(nominal) ? null : nominal;
     pos.couponRate = isNaN(coupon) ? null : coupon;
     pos.lastCouponDate = lastCoupon || null;
+    if(pendingBondPrice != null){
+      pos.currentPrice = pendingBondPrice;
+      pos.currentPriceDate = localISODate(new Date());
+      pos.currentPriceSource = "pse.cz";
+      pendingBondPrice = null;
+    }
   }
   P.positions.push(pos);
   savePortfolio();
